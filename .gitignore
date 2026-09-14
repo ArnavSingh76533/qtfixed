@@ -1,0 +1,21 @@
+# Credentials
+.env
+.env.*
+!.env.example
+# Existing records, campaign state, conversation state, backups
+*.json
+*.backup
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.lock
+*.tmp
+*.zip
+# Python/runtime
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+.DS_Store

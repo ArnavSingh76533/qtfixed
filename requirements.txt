@@ -1,0 +1,5 @@
+python-telegram-bot==22.8
+httpx[socks]==0.28.1
+filelock>=3.13.0,<4.0
+python-dotenv>=1.0,<2.0
+markdown-it-py>=3.0,<5.0

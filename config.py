@@ -1,0 +1,53 @@
+"""Load configuration before importing any bot modules."""
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / '.env', override=False)
+DATA_DIR = Path(os.environ.get('DATA_DIR') or BASE_DIR).expanduser()
+if not DATA_DIR.is_absolute():
+    DATA_DIR = BASE_DIR / DATA_DIR
+DATA_DIR = DATA_DIR.resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '').strip()
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '').strip()
+GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b').strip()
+
+
+def positive_int(name, default, maximum):
+    try:
+        value = int(os.environ.get(name, default))
+    except ValueError:
+        raise SystemExit(f'{name} must be an integer') from None
+    if not 1 <= value <= maximum:
+        raise SystemExit(f'{name} must be between 1 and {maximum}')
+    return value
+
+
+MAX_OUTPUT_TOKENS = positive_int('MAX_OUTPUT_TOKENS', 4096, 16384)
+MAX_CONCURRENT_REQUESTS = positive_int('MAX_CONCURRENT_REQUESTS', 8, 100)
+MAX_CONTEXT_CHARS = positive_int('MAX_CONTEXT_CHARS', 40000, 200000)
+REQUEST_TIMEOUT = positive_int('REQUEST_TIMEOUT', 180, 600)
+DRAFT_STREAMING = os.environ.get('DRAFT_STREAMING', 'true').lower() in ('true', '1', 'yes')
+GROUP_MENTIONS_ONLY = os.environ.get('GROUP_MENTIONS_ONLY', 'true').lower() in ('true', '1', 'yes')
+SYSTEM_PROMPT = (
+    "Your name is Question Ai. You specialize in math, general knowledge, science, etc. and many different subjects. "
+    "You also specialize in programming. "
+    "This bot accepts text questions only. Ask users to type any question they need help with. "
+    "You always give short and general answers, but if you are asked for clarification, you answer in a long paragraph."
+    "you also use few emojis in yours answers."
+    "you always send the programming code snippets without explanation and comments and explains only when user ask for it."
+    "Don't use latex formatting"
+)
+FORMATTING_PROMPT = (
+    " Use Markdown for readable formatting, including **bold**, lists, and fenced code blocks with language labels. "
+    "Use plain-text or Unicode math. Do not claim to browse or execute code; this bot has no such tools."
+)
+
+
+def validate():
+    missing = [name for name, value in [('BOT_TOKEN', BOT_TOKEN), ('GROQ_API_KEY', GROQ_API_KEY)]
+               if not value or value.startswith(('YOUR_', 'PASTE_'))]
+    if missing:
+        raise SystemExit('Fill in ' + ', '.join(missing) + ' in the .env file beside main.py.')
