@@ -2,7 +2,7 @@
 import json
 import sqlite3
 
-DEFAULTS = {'streaming': True, 'style': 'balanced', 'reasoning': 'medium'}
+DEFAULTS = {'streaming': True, 'style': 'balanced', 'reasoning': 'medium', 'math': 'image'}
 
 
 class ChatStore:

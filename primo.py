@@ -1,4 +1,4 @@
-from config import DATA_DIR
+from config import DATA_DIR, FREE_DAILY_QUOTA
 import json
 import string
 import secrets
@@ -138,10 +138,21 @@ async def log_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         flush_cache_to_file()
         await notify_log(context.bot, f"A new user with user ID {user_id} has started the bot.")
     
-    await update.message.reply_text(
-        'Welcome to Question Ai! 🤖 I\'m here to assist you with all sorts of questions, from math and science to general knowledge and programming. '
-        'To get started, just send me your questions in text format and ask for help. Let\'s embark on a learning journey together! 🚀'
-    )
+    caption = ("⚡ Welcome to Question Ai!\n\n"
+               "Ask a question, send a photo, or explore current information with /web. "
+               "I can help with math, science, coding, and more.\n"
+               "Use /settings for streaming, answer style, and math display. "
+               "Try @queryaibot your question from any chat.")
+    banner = Path(__file__).resolve().parent / 'assets' / 'welcome.png'
+    if banner.exists():
+        try:
+            with banner.open('rb') as photo:
+                await update.message.reply_photo(photo,caption=caption)
+            return
+        except TelegramError:
+            logger.warning('Welcome photo could not be sent; using text')
+    await update.message.reply_text(caption)
+
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
@@ -166,7 +177,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🟣 **Your Subscription**:\n"
                 f"   ⤷ You have no active subscription. Please contact the admin by clicking [here](https://t.me/yucant) to buy. 💬\n"
                 f"🟣 **Your Questions Pack**:\n"
-                f"   ⤷ Questions left: {max(0, 20 - user.get('request_count', 0))}/20"
+                f"   ⤷ Questions left: {max(0, FREE_DAILY_QUOTA - user.get('request_count', 0))}/{FREE_DAILY_QUOTA}"
             )
         else:
             response = (
@@ -181,7 +192,7 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🟣 **Your Subscription**:\n"
             f"   ⤷ You have no active subscription. Please contact the admin by clicking [here](https://t.me/yucant) to buy. 💬\n"
             f"🟣 **Your Questions Pack**:\n"
-            f"   ⤷ Questions left: {max(0, 20 - user.get('request_count', 0))}/20"
+            f"   ⤷ Questions left: {max(0, FREE_DAILY_QUOTA - user.get('request_count', 0))}/{FREE_DAILY_QUOTA}"
         )
     
     await update.message.reply_text(response, parse_mode=ParseMode.MARKDOWN)
@@ -235,20 +246,11 @@ async def claim_promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Sorry, the promo code is either invalid or has already been claimed.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # If in group, show group welcome message
-    if update.message.chat.type in ['group', 'supergroup']:
-        welcome_message = (
-            "Thanks for adding me! 👋\n"
-            "To use me in this group, please:\n"
-            "1️⃣ Start me in DM first (click button below)\n"
-            "2️⃣ Group admin must use /allowgroup to enable group usage\n\n"
-            "❗️ Group admins can use /disallowgroup to disable group usage"
-        )
-        await update.message.reply_text(welcome_message)
+    if update.effective_chat.type in ('group','supergroup'):
+        register_group(update.effective_chat)
+        await welcome_group(update.effective_chat,context,force=True)
         return
-    
-    # If in private chat, proceed with normal user registration
-    await log_user_data(update, context)
+    await log_user_data(update,context)
 
 def backup_user_data():
     if os.path.exists(user_file):
@@ -304,116 +306,96 @@ def load_group_data():
 def save_group_data(data):
     write_json(GROUP_DATA_FILE, data)
 
-async def handle_group_addition(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Skip if not a group chat
-    if update.message.chat.type not in ['group', 'supergroup']:
-        return
+def register_group(chat, joined=False):
+    groups=load_group_data()
+    key=str(chat.id)
+    previous=groups.get(key,{})
+    now=datetime.datetime.now(datetime.timezone.utc).isoformat()
+    info={**previous,'name':getattr(chat,'title',None) or key,
+          'added_time':previous.get('added_time',now),
+          'link':getattr(chat,'invite_link',None) or previous.get('link') or 'Private Group',
+          'is_allowed':True if joined else previous.get('is_allowed',True),
+          'is_member':True}
+    # A removal/re-add is a new welcome; duplicate Telegram join updates are not.
+    if joined and previous.get('is_member') is False:
+        info.pop('welcome_sent_at',None)
+    groups[key]=info
+    save_group_data(groups)
+    return info
 
-    if not any(member.id == context.bot.id for member in update.message.new_chat_members):
-        return
-    chat = update.message.chat
-    chat_id = str(chat.id)
-    
-    # Load existing group data
-    groups = load_group_data()
-    
-    # Check if group is already registered
-    if chat_id not in groups:
-        group_info = {
-            'name': chat.title,
-            'added_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'link': chat.invite_link if chat.invite_link else 'Private Group',
-            'is_allowed': False
-        }
-        groups[chat_id] = group_info
+
+async def welcome_group(chat,context,force=False):
+    groups=load_group_data()
+    info=groups.get(str(chat.id),{})
+    if info.get('welcome_sent_at') and not force:return
+    username=context.bot.username or BOT_USERNAME
+    text=('⚡ Thanks for adding Question Ai!\n\n'
+          f'This group is saved. Ask with /ask@{username} hello, send a photo, or use /web for current information.\n'
+          'New users should open me in private and send /start once.\n'
+          'Use /groupstatus for setup help. Group admins can use /disallowgroup or /allowgroup.')
+    await context.bot.send_message(chat.id,text,reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton('Open Question Ai',url=f'https://t.me/{username}?start=group')]]))
+    # Reload after the await so unrelated group updates cannot be overwritten.
+    groups=load_group_data()
+    if str(chat.id) in groups:
+        groups[str(chat.id)]['welcome_sent_at']=datetime.datetime.now(datetime.timezone.utc).isoformat()
         save_group_data(groups)
-        
-        # Send notification to log channel
-        log_message = (
-            f"🔔 Bot added to new group!\n"
-            f"📝 Group Name: {chat.title}\n"
-            f"🆔 Group ID: {chat_id}\n"
-            f"🔗 Invite Link: {chat.invite_link if chat.invite_link else 'Private Group'}\n"
-            f"⏰ Added Time: {group_info['added_time']}"
-        )
-        await notify_log(context.bot, log_message)
-        
-        # Create "Start in DM" button
-        keyboard = [[InlineKeyboardButton(
-            "Start me in DM first", 
-            url=f"https://t.me/{BOT_USERNAME}?start=true"
-        )]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Send welcome message in group
-        welcome_message = (
-            "Thanks for adding me! 👋\n"
-            "To use me in this group, please:\n"
-            "1️⃣ Start me in DM first (click button below)\n"
-            "2️⃣ Group admin must use /allowgroup to enable group usage\n\n"
-            "❗️ Group admins can use /disallowgroup to disable group usage"
-        )
-        await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
-async def allow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("This command can only be used in groups!")
-        return
-        
-    # Check if user is admin
-    user_id = update.effective_user.id
-    chat_id = str(update.message.chat.id)
-    chat = update.message.chat
-    
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        if member.status not in ['creator', 'administrator']:
-            await update.message.reply_text("⚠️ Only group administrators can use this command!")
-            return
-            
-        groups = load_group_data()
-        if chat_id not in groups:
-            # Add group data if not present
-            groups[chat_id] = {
-                'name': chat.title,
-                'added_time': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'link': chat.invite_link if chat.invite_link else 'Private Group',
-                'is_allowed': True  # Set to True immediately
-            }
-            save_group_data(groups)
-            await update.message.reply_text("✅ Bot has been enabled for this group!")
-        else:
-            groups[chat_id]['is_allowed'] = True
-            save_group_data(groups)
-            await update.message.reply_text("✅ Bot has been enabled for this group!")
-            
-    except Exception as e:
-        logger.error(f"Error in allow_group: {e}")
-        await update.message.reply_text("An error occurred. Please try again later.")
 
-async def disallow_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.chat.type not in ['group', 'supergroup']:
-        await update.message.reply_text("This command can only be used in groups!")
-        return
-        
-    # Check if user is admin
-    user_id = update.effective_user.id
-    chat_id = str(update.message.chat.id)
-    
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        if member.status not in ['creator', 'administrator']:
-            await update.message.reply_text("⚠️ Only group administrators can use this command!")
-            return
-            
-        groups = load_group_data()
-        if chat_id in groups:
-            groups[chat_id]['is_allowed'] = False
+async def handle_group_addition(update: Update,context: ContextTypes.DEFAULT_TYPE):
+    message=update.effective_message
+    if not message or message.chat.type not in ('group','supergroup'):return
+    if not any(member.id==context.bot.id for member in message.new_chat_members):return
+    register_group(message.chat,joined=True)
+    await welcome_group(message.chat,context)
+
+
+async def bot_membership_changed(update,context):
+    change=update.my_chat_member
+    if not change or change.chat.type not in ('group','supergroup'):return
+    def present(member):
+        return member.status in ('member','administrator','creator') or (member.status=='restricted' and member.is_member)
+    was,now=present(change.old_chat_member),present(change.new_chat_member)
+    if now and not was:
+        register_group(change.chat,joined=True)
+        await welcome_group(change.chat,context)
+    elif was and not now:
+        groups=load_group_data()
+        if str(change.chat.id) in groups:
+            groups[str(change.chat.id)]['is_member']=False
+            groups[str(change.chat.id)].pop('welcome_sent_at',None)
             save_group_data(groups)
-            await update.message.reply_text("❌ Bot has been disabled for this group!")
-        else:
-            await update.message.reply_text("❌ Please remove and add the bot to the group again!")
-            
-    except Exception as e:
-        logger.error(f"Error in disallow_group: {e}")
-        await update.message.reply_text("An error occurred. Please try again later.")
+
+
+async def set_group_allowed(update,context,allowed):
+    message=update.effective_message
+    chat=update.effective_chat
+    if chat.type not in ('group','supergroup'):
+        await message.reply_text('This command can only be used in groups.');return
+    sender=getattr(message,'sender_chat',None)
+    anonymous_admin=sender is not None and sender.id==chat.id
+    try:
+        if not anonymous_admin and str(update.effective_user.id)!=ADMIN_ID:
+            member=await context.bot.get_chat_member(chat.id,update.effective_user.id)
+            if member.status not in ('administrator','creator'):
+                await message.reply_text('Only group administrators can use this command.');return
+    except TelegramError:
+        logger.warning('Could not verify group administrator')
+        await message.reply_text('Could not verify your group-admin status. Make sure the bot is still in this group, then retry.');return
+    try:
+        register_group(chat)
+        groups=load_group_data()
+        groups[str(chat.id)]['is_allowed']=allowed
+        save_group_data(groups)
+    except (OSError,ValueError):
+        logger.exception('Could not save group configuration')
+        await message.reply_text('Could not save group data. The bot owner should check DATA_DIR permissions and group_data.json.');return
+    await message.reply_text('✅ Group enabled. Send /ask hello.' if allowed else 'Group disabled. An admin can re-enable it with /allowgroup.')
+
+
+async def allow_group(update,context):
+    await set_group_allowed(update,context,True)
+
+
+async def disallow_group(update,context):
+    await set_group_allowed(update,context,False)

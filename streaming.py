@@ -17,8 +17,15 @@ class StreamPreview:
         self.draft_id = message.message_id or 1
 
     async def start(self):
-        self.status = await self.message.reply_text('Thinking…', reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton('⏹ Stop', callback_data=f'chat:stop:{self.owner}')]]))
+        self.status = await self.message.reply_text('⚡ Working…', reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton('⏹ Stop', callback_data=f'chat:stop:{self.owner}',style='danger')]]))
+
+    async def set_status(self,text):
+        markup=InlineKeyboardMarkup([[InlineKeyboardButton('⏹ Stop',callback_data=f'chat:stop:{self.owner}',style='danger')]])
+        try:
+            await self.status.edit_text(text,reply_markup=markup)
+        except TelegramError:
+            pass
 
     async def update(self, text):
         now = time.monotonic()
@@ -39,7 +46,7 @@ class StreamPreview:
                     self.draft = False
             if not self.draft:
                 await self.status.edit_text(preview, link_preview_options=LinkPreviewOptions(is_disabled=True),
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⏹ Stop', callback_data=f'chat:stop:{self.owner}')]]))
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('⏹ Stop', callback_data=f'chat:stop:{self.owner}',style='danger')]]))
             self.last_text = preview
         except RetryAfter as error:
             delay = error.retry_after

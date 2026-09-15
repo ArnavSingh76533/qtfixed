@@ -23,7 +23,7 @@ from telegram.error import BadRequest
 
 def update(user='123', chat=123):
     message = NS(reply_text=AsyncMock(), reply_document=AsyncMock(), sender_chat=None,
-                 text='Hello', chat=NS(type='private'), photo=[], caption=None)
+                 text='Hello', chat=NS(type='private'), photo=[], caption=None, reply_photo=AsyncMock())
     person = NS(id=int(user))
     message.from_user = person
     return NS(message=message, effective_user=person,
@@ -106,10 +106,10 @@ class RegressionTests(unittest.IsolatedAsyncioTestCase):
 
 
 
-    def test_image_integration_removed(self):
+    def test_image_integration_restored(self):
         source = Path(main.__file__).read_text()
-        self.assertFalse(hasattr(main, 'handle_image'))
-        self.assertNotIn('filters.PHOTO', source)
+        self.assertTrue(hasattr(main, 'image_command'))
+        self.assertIn('filters.PHOTO', source)
         self.assertNotIn('compscilib', source)
 
     def test_atomic_storage_and_recovery(self):
@@ -127,7 +127,7 @@ class RegressionTests(unittest.IsolatedAsyncioTestCase):
         u=update();c=context();c.bot.send_message.side_effect=BadRequest('no chat')
         await primo.log_user_data(u,c)
         self.assertIn('123',primo.load_user_data())
-        u.message.reply_text.assert_awaited_once()
+        self.assertEqual(u.message.reply_photo.await_count + u.message.reply_text.await_count, 1)
 
 
 if __name__ == '__main__':

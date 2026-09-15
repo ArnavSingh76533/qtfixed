@@ -25,6 +25,7 @@ def main():
         paths=list(ROOT.glob('*.py')) + [ROOT/'requirements.txt',ROOT/'README.md',ROOT/'.gitignore',ROOT/'.env.example']
         paths += list((ROOT/'tests').glob('*.py')) + list((ROOT/'scripts').glob('*.py'))
         paths += list((ROOT/'.github/workflows').glob('*.yml'))
+        paths += list((ROOT/'assets').glob('*.png'))
         for path in paths:
             destination=target/path.relative_to(ROOT)
             destination.parent.mkdir(parents=True,exist_ok=True)

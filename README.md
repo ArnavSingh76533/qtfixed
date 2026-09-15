@@ -1,11 +1,131 @@
 # Question Ai — Groq Telegram Bot
 
-A text-only Telegram assistant using **Groq `openai/gpt-oss-120b`**, your original
+A Telegram assistant for text, images, math, and current-context web answers using **Groq `openai/gpt-oss-120b`**, your original
 **Question Ai system prompt**, live streaming, native Telegram formatting, saved
 conversations, and persistent broadcast campaigns.
 
 The ZIP includes the original JSON files and five user-data backups unchanged.
 The GitHub publishing helper includes source code only, never your records or keys.
+
+## Group, photo, math, inline, and web update
+
+### Update your running bot
+
+```bash
+git pull
+python -m pip install -r requirements.txt
+```
+
+Restart the bot after installing dependencies. Existing `.env`, JSON, and runtime
+state are preserved by Git because they are ignored. Keep your original records
+in the same DATA_DIR. The free quota is now **40**, shared by regular, image, web,
+and inline answers. Existing usage counts are retained; this update does not reset
+them. The Copy answer button is removed; Telegram's native code selection remains.
+
+### Groups
+
+- When added to a group, the bot saves its name/ID and membership, enables it, and
+  sends a welcome message. Join updates are deduplicated. No separate allow step
+  is required for new groups. Saved active groups are eligible for `-group` campaigns.
+- Previously explicitly disabled groups stay disabled until `/allowgroup` or a
+  genuine remove/re-add. Disabled requests now get an explanation instead of silence.
+- `/start` in an already-existing group registers missing group data too.
+- Try `/ask@queryaibot hello`. `/groupstatus` reports enablement and privacy settings.
+- Telegram can withhold unaddressed commands/ordinary messages when Group Privacy
+  is enabled. Make the bot a group admin, or disable Group Privacy via BotFather
+  (`/setprivacy`; Telegram may require removing/re-adding the bot after a change).
+  The bot code cannot change BotFather settings. Explicit `/ask@queryaibot` targets
+  this bot even when Telegram would send plain `/ask` to another privacy-enabled bot.
+- Members still need to register privately with `/start` and satisfy the existing
+  channel requirement. The bot explains those conditions instead of ignoring them.
+- Settings changes edit the existing settings panel, including in groups.
+
+### Image → extracted text → AI
+
+Send a photo or an image document. You can also reply to an image with `/ocr` or
+`/ask explain this`. The bot downloads the image, extracts text, appends your caption
+and an embedded solve/explain instruction, then uses the normal AI/web answer flow.
+Quota is charged once, only after a completed answer is delivered.
+
+The original `compscilib.com/image-to-text` endpoint is restored. Since that external
+service may be unavailable, `OCR_MODE=auto` falls back to local Tesseract. Install:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y tesseract-ocr
+```
+
+Optional `.env` settings:
+
+```dotenv
+OCR_MODE=auto
+OCR_URL=https://ai-service-prod.compscilib.com/image-to-text
+WEB_ENABLED=true
+GROUP_MENTIONS_ONLY=false
+```
+
+`OCR_MODE=local` keeps images on your server; `remote` uses the configured API.
+Local Tesseract works best on clear printed text; handwriting and dense math can
+be inaccurate. The solve prompt asks the AI to request clarification for unreadable
+symbols. File size is limited to 10 MB, decoded images to 25 megapixels, and OCR
+text to 20,000 characters. The old instruction forbidding LaTeX is intentionally
+replaced by the newly requested math support.
+
+### Math formatting
+
+- Display equations in `\[ ... \]` or `$$ ... $$` are rendered into local PNGs.
+- Inline equations become readable text, with fractions kept parenthesized.
+- Code fences and inline code are preserved literally.
+- `/settings` → Math switches between `image` and `unicode`.
+- Mathtext handles a useful subset of LaTeX, not a full TeX document. Unsupported
+  environments/macros fall back to readable text. At most eight display equations
+  are rendered per answer; additional equations use text. No shell or external
+  LaTeX compilation is performed.
+
+### Inline answers
+
+In BotFather, configure `@queryaibot`:
+
+1. `/setinline` → enable and set a query placeholder.
+2. `/setinlinefeedback` → **100%** for generation immediately after selection.
+
+Then type `@queryaibot what is photosynthesis?` in any chat and select the result.
+The inline result appears immediately; generation starts after selection, not on
+every keystroke. If feedback is off, tap **Generate answer**. Inline controls check
+ownership, use the same 40-question quota, and never include private conversation
+history. Inline math uses readable text, because an inline text result cannot be
+expanded into multiple photo messages. Long answers have Previous/Next buttons.
+Inline sessions last 30 minutes in memory and expire on restart.
+
+### Current-context web answers
+
+Your supplied Felo request/stream workflow is integrated. `/web <question>` forces
+web search; clear current-context questions route automatically, and Groq can also
+invoke a `web_search` function for cases such as changing officeholders. The original
+Question Ai prompt is retained with the new routing instruction appended.
+
+The integration parses complete SSE events, reconnects with a fresh replay buffer
+to avoid duplicate text, and has an overall timeout. Incomplete results are labeled.
+It uses your supplied endpoint contract; Felo is an external service and can change
+or reject unauthenticated requests. No access challenges are bypassed. Web errors
+are visible and do not claim that current information was verified. Felo's answer
+is relayed with whatever links it supplies; sources are never fabricated. Questions
+routed to web are sent to Felo; this is also explained by `/privacy`.
+
+### Visual controls
+
+Status messages use regular ⚡ emoji. Retry/New/Stop and broadcast controls use
+Telegram's primary/success/danger button styles. No Premium emoji configuration
+is needed. The bot's stored premium question subscriptions remain supported.
+
+### Welcome visual
+
+`assets/welcome.png` is the generated Question Ai welcome banner used by `/start`
+in private chat. If sending the photo fails, the bot falls back to text. Generation
+uses the built-in image tool; prompt: a navy/cyan/violet Q orbital emblem with a
+lightning motif, title “Question Ai”, and “Ask. Explore. Understand.” subtitle.
+The status message is now **⚡ Working…**, with **⚡ Reading image…** for OCR and
+**🌐 Searching the web…** for web work.
 
 ## 1. Quick start
 
@@ -85,15 +205,14 @@ User recovery tries readable timestamped backups without changing the source ZIP
   in groups or when drafts are unavailable. Streaming displays partial plain text;
   final replies receive full formatting and are saved as normal messages.
 - Your original **Question Ai** identity and instructions are the first system
-  message: short/general answers by default, longer clarification, a few emojis,
-  code without explanations/comments unless asked, and no LaTeX. Obsolete photo
-  instructions were removed. A separate formatting instruction requests fenced
-  code blocks. User-selected style can override the default response length.
+  message: short/general answers by default, longer clarification, a few emojis and code without explanations/comments unless asked. Photo support
+  is restored. The old no-LaTeX rule is replaced by LaTeX support, as requested.
+  A web-search instruction routes questions needing current context to Felo. User-selected style can override the default response length.
 - Groq internal reasoning is not displayed. Only answer `delta.content` is read.
 - Bold, italic, strikethrough, headings, links, spoilers, blockquotes, inline code,
   and code blocks with language labels use Telegram message entities.
-- Code blocks support native Telegram selection/copying. Short answers also get
-  a Copy answer button (within Telegram's 256-unit limit).
+- Code blocks support native Telegram selection/copying. The separate Copy answer
+  button has been removed.
 - Long answers are split into Unicode-safe messages, with code and other formatting
   preserved across boundaries. Tables are displayed as readable text rows.
 - `/stop` cancels generation; one in-flight answer per user prevents quota races.
@@ -105,7 +224,8 @@ User recovery tries readable timestamped backups without changing the source ZIP
   It uses one successful question. Previously posted Telegram messages stay visible.
 - Failed, cancelled, or incomplete requests do not enter saved history or consume
   bot quota. Groq may still bill provider usage for cancelled/failed requests.
-- In enabled groups, the default is mention/reply/`/ask` only. Forum topics get
+- In enabled groups, ordinary delivered text is accepted by default; `/ask` always
+  works when Telegram delivers the command. Forum topics get
   separate histories. Anonymous administrator posts are ignored.
 - Commands remain responsive during generation and broadcasting. Startup registers
   the Telegram command menu. Inline controls verify the original user's identity.
@@ -128,7 +248,7 @@ User recovery tries readable timestamped backups without changing the source ZIP
 | `/privacy` | Explain Groq, local history, and current logging |
 | `/help` | Show commands |
 
-Quota remains **20 successfully delivered questions per 24-hour window** for free
+Quota remains **40 successfully delivered questions per 24-hour window** for free
 users; premium users have unlimited questions. The window starts with the first
 successful request. Subscription expiry is enforced before answering. `/forget`
 does not erase registration, quota, other chats, Telegram messages, or admin logs.
@@ -232,7 +352,10 @@ requires admin maintenance; no automatic probing is performed.
 | `/setlogchannel <id\|@username\|off>` | Persist a log destination or disable logging |
 | `/allowgroup`, `/disallowgroup` | Group administrators enable/disable group usage |
 
-Existing enabled groups stay enabled. Newly added groups require `/allowgroup`.
+Existing enabled groups stay enabled. Newly added groups are saved and enabled automatically, with a welcome message.
+Both service-message and `my_chat_member` join updates are handled. Removing the
+bot marks the group as no longer reachable for broadcasts. `/allowgroup` no longer
+assumes a basic Telegram Chat has an `invite_link` field.
 Admin operations check the configured Telegram user ID, not the command name.
 
 ## 6. Configuration reference
@@ -247,7 +370,7 @@ Admin operations check the configured Telegram user ID, not the command name.
 | `MAX_CONCURRENT_REQUESTS` | 8 users; up to 100 |
 | `MAX_CONTEXT_CHARS` | 40000; preserves complete recent exchanges |
 | `DRAFT_STREAMING` | `true`; private-chat drafts with automatic fallback |
-| `GROUP_MENTIONS_ONLY` | `true`; set `false` for the original group-wide text handling |
+| `GROUP_MENTIONS_ONLY` | `false`; set `true` to restrict ordinary text to mentions/replies |
 | `ADMIN_ID` | Original `629986639`; replace for another owner |
 | `BOT_USERNAME` | Original `queryaibot`; registration links use this |
 | `CHANNEL_ID` | Original `-1002081366095`; empty disables membership requirement |
@@ -313,8 +436,8 @@ and 3.12 when the source is pushed to GitHub; local validation used Python 3.12.
 Live provider access, Telegram permissions, client rendering, and account-specific
 rate limits still require a run with your configured keys. Changing `GROQ_MODEL`
 requires a model enabled for your Groq account. Reasoning controls are sent only
-for GPT-OSS models. No browsing, code-execution tools, images, voice, or payments
-were added. Local token counting is a character budget, not an exact tokenizer.
+for GPT-OSS models. Felo web search and image OCR are included. Code execution, voice, and payments
+are not included. Local token counting is a character budget, not an exact tokenizer.
 
 User/quota JSON persistence and history/campaign SQLite are separate stores; they
 are not one transaction. Promo consumption and user activation also remain separate

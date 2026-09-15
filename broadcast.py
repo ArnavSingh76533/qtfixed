@@ -130,7 +130,7 @@ class BroadcastManager:
                         continue
                 result.add(uid)
         if 'group' in options['audience']:
-            result.update(k for k,v in load_group_data().items() if v.get('is_allowed'))
+            result.update(k for k,v in load_group_data().items() if v.get('is_allowed') and v.get('is_member',True))
         blocked = {r[0] for r in self.db.execute('SELECT chat FROM blocked')}
         result = sorted(result-blocked)
         if options['random'] is not None:
@@ -237,7 +237,7 @@ class BroadcastManager:
                     return
                 target = target[0]
                 # Recheck group permission and blocked status at delivery time.
-                if self.db.execute('SELECT 1 FROM blocked WHERE chat=?',(target,)).fetchone() or (target.startswith('-') and not load_group_data().get(target,{}).get('is_allowed')):
+                if self.db.execute('SELECT 1 FROM blocked WHERE chat=?',(target,)).fetchone() or (target.startswith('-') and not (load_group_data().get(target,{}).get('is_allowed') and load_group_data().get(target,{}).get('is_member',True))):
                     self.recipient_state(campaign_id,target,'skipped','Blocked or disabled')
                     continue
                 self.recipient_state(campaign_id,target,'sending')
@@ -294,10 +294,10 @@ async def admin_only(update):
 
 def campaign_keyboard(cid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton('▶ Start / resume',callback_data=f'bc:start:{cid}'),
+        [InlineKeyboardButton('▶ Start / resume',callback_data=f'bc:start:{cid}',style='success'),
          InlineKeyboardButton('⏸ Pause',callback_data=f'bc:pause:{cid}')],
         [InlineKeyboardButton('Refresh status',callback_data=f'bc:status:{cid}'),
-         InlineKeyboardButton('Cancel',callback_data=f'bc:cancel:{cid}')]])
+         InlineKeyboardButton('Cancel',callback_data=f'bc:cancel:{cid}',style='danger')]])
 
 
 async def broadcast(update, context):

@@ -107,7 +107,7 @@ class FormattingTests(unittest.TestCase):
     def test_original_system_prompt(self):
         self.assertIn('Your name is Question Ai.',config.SYSTEM_PROMPT)
         self.assertIn('short and general answers',config.SYSTEM_PROMPT)
-        self.assertIn("Don't use latex formatting",config.SYSTEM_PROMPT)
+        self.assertIn("Use LaTeX",config.SYSTEM_PROMPT)
         messages=main.provider_messages([],'Hello',{'style':'balanced'})
         self.assertEqual(messages[0]['role'],'system')
         self.assertTrue(messages[0]['content'].startswith(config.SYSTEM_PROMPT))

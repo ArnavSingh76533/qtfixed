@@ -9,6 +9,11 @@ class ProviderError(Exception):
     """Safe, user-facing error without credentials or provider response bodies."""
 
 
+class WebSearchRequested(Exception):
+    def __init__(self, query):
+        self.query = query
+
+
 class GroqClient:
     def __init__(self, api_key, client=None):
         self.client = client or httpx.AsyncClient(
@@ -19,12 +24,21 @@ class GroqClient:
     async def close(self):
         await self.client.aclose()
 
-    async def stream(self, messages, *, reasoning='medium'):
+    async def stream(self, messages, *, reasoning='medium', allow_web=False):
         payload = {'model': config.GROQ_MODEL, 'messages': messages, 'stream': True,
                    'max_completion_tokens': config.MAX_OUTPUT_TOKENS}
         if config.GROQ_MODEL.startswith('openai/gpt-oss-'):
             payload.update(include_reasoning=False, reasoning_effort=reasoning)
-        headers = {'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}
+        if allow_web:
+            payload['tools'] = [{'type':'function','function':{
+                'name':'web_search',
+                'description':'Answer a question needing current facts, news, recent events, prices, schedules, or an explicit web search.',
+                'parameters':{'type':'object','properties':{'query':{'type':'string'}},'required':['query']}}}]
+            payload['tool_choice'] = 'auto'
+            payload['parallel_tool_calls'] = False
+        tool_name = ''
+        tool_arguments = ''
+        headers = {'Authorization' : f'Bearer {self.api_key}', 'Content-Type': 'application/json'}
         emitted = False
         for attempt in range(3):
             finished = False
@@ -60,7 +74,16 @@ class GroqClient:
                             if not choices:
                                 continue
                             choice = choices[0]
-                            content = (choice.get('delta') or {}).get('content')
+                            delta = choice.get('delta') or {}
+                            for call in delta.get('tool_calls') or []:
+                                if call.get('index',0) != 0:
+                                    continue
+                                function = call.get('function') or {}
+                                tool_name += function.get('name') or ''
+                                tool_arguments += function.get('arguments') or ''
+                                if len(tool_arguments)>10000:
+                                    raise ProviderError('The web query was too large.')
+                            content = delta.get('content')
                             if isinstance(content, str) and content:
                                 emitted = True
                                 yield content
@@ -69,6 +92,12 @@ class GroqClient:
                                 finished = True
                                 if reason == 'length':
                                     yield '\n\n_Response reached the output limit. Ask me to continue._'
+                        if tool_name:
+                            args = json.loads(tool_arguments)
+                            query = args.get('query') if isinstance(args,dict) else None
+                            if tool_name != 'web_search' or not isinstance(query,str) or not query.strip() or len(query)>4000:
+                                raise ProviderError('Could not prepare a valid web search. Try /web followed by your question.')
+                            raise WebSearchRequested(query.strip())
                         if not finished:
                             raise ProviderError('The connection ended before the answer completed. Please retry.')
                         if not emitted:

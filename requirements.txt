@@ -3,3 +3,7 @@ httpx[socks]==0.28.1
 filelock>=3.13.0,<4.0
 python-dotenv>=1.0,<2.0
 markdown-it-py>=3.0,<5.0
+pylatexenc>=2.10,<3
+matplotlib>=3.7,<4
+Pillow>=10,<12
+pytesseract>=0.3.10,<0.4
