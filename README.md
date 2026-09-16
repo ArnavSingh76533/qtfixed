@@ -7,6 +7,85 @@ conversations, and persistent broadcast campaigns.
 The ZIP includes the original JSON files and five user-data backups unchanged.
 The GitHub publishing helper includes source code only, never your records or keys.
 
+## Native rich messages, guest mode and image generation
+
+Update with `git pull`, install `requirements.txt`, fill the new image keys in
+`.env`, and restart. Open **/settings in the bot owner's private chat**. These
+settings apply globally: streaming, answer style, reasoning and Rich/Unicode
+formatting. Old per-chat settings are retained on disk but no longer applied.
+Regular users cannot open settings, change them through old buttons, or use
+`/model`. Public menus and answer buttons contain no settings/model controls.
+
+### Pick exactly one external access mode
+
+The admin panel has **Inline / Guest / Off**. The selection is persistent and
+mutually exclusive; switching cancels queued/running inline and guest generations.
+Normal private chats and `/ask` in groups remain available in all three modes.
+
+- **Inline** (default): BotFather `/setinline`, then `/setinlinefeedback` →
+  **Enabled** (100%). Type `@queryaibot your question` and select the result.
+- **Guest**: enable **Guest Mode** in the bot's settings inside BotFather's Mini App.
+  Mention the bot in a chat, or reply to its guest answer. The bot uses Telegram's
+  real `guest_message` / `answerGuestQuery` API and edits the returned inline message.
+- **Off**: neither external mode accepts new requests.
+
+The Bot API cannot change an ordinary bot's BotFather toggles. Match those toggles
+manually to the mode selected in `/settings` (disable the other mode there).
+The application also checks the mode on every incoming query and callback, so
+only the selected mode executes even if both BotFather toggles remain enabled.
+
+Guest mode receives only the summoning message and any supplied reply context.
+It never reads private bot history or registers the guest chat for broadcasts.
+Identified guest users get a quota record automatically; the existing channel
+membership requirement still applies to free users. Guest-only users are excluded
+from private broadcasts until they start the bot in DM. Anonymous/bot callers are
+ignored. Inline and guest answers show **Asked: original query** above the answer.
+
+### Image generation
+
+```dotenv
+FAL_API_KEY=your_fal_key
+GETIMG_API_KEY=your_getimg_key
+# Optional: a private staging channel where the bot can upload/delete photos.
+IMAGE_CACHE_CHAT_ID=
+```
+
+Use `/image <description>` (aliases `/flux` and `/flux2`), reply to a prompt with
+`/image`, or naturally ask to create/draw a picture. Clear image requests route
+directly; the language model also has a `generate_image` tool for other phrasing.
+The first provider is **fal FLUX Schnell over HTTPS**; service/configuration or
+invalid-image failures trigger **getimg FLUX Schnell**. Provider content rejections
+are not bypassed via fallback. Both integrations use async HTTP, timeouts, bounded
+image downloads and no shared temporary filenames.
+
+Default size: **landscape 16:9**. Optional flags:
+`-p1` portrait 4:3, `-p2` portrait 16:9, `-l1` landscape 4:3,
+`-l2` landscape 16:9, `-s1` square, `-s2`/`-hd` square HD.
+
+Free users receive **1 image per prompt**; the bot's active premium subscribers
+receive **4 per prompt** as an album. One successfully delivered request uses one
+question from the existing 40-question free window; there is no extra one-image-
+per-day limit. Failed requests are not charged to the bot quota (providers can
+still charge for attempted generation). The original image prompt and user ID
+are logged immediately as plain text in the configured log group.
+
+Inline/guest image galleries use native rich media. Telegram requires uploaded
+file IDs for those messages: use `IMAGE_CACHE_CHAT_ID` for a private staging
+channel. Without it, images are briefly uploaded to the requesting user's DM,
+then those staging messages are deleted. New guest users must first `/start` in
+DM for this fallback. If deleting a staging message fails, it may remain there.
+No live image-generation calls are made by the test suite.
+
+### Request queue
+
+The old “you already have a reply in progress” rejection is removed. Requests queue
+in order per user, including across normal/inline/guest modes. Different users can
+run concurrently. Quota is rechecked at execution time. The queue is bounded to
+8 pending/running requests per user and 200 total; `MAX_CONCURRENT_REQUESTS` caps
+simultaneous generation. `/stop` in DM cancels your jobs across modes; in a group
+it cancels your jobs in that chat/topic. Queued jobs are in memory and do not
+survive restart. History and completed quota records do survive.
+
 ## Group, photo, math, inline, and web update
 
 ### Update your running bot
@@ -38,7 +117,7 @@ them. The Copy answer button is removed; Telegram's native code selection remain
   this bot even when Telegram would send plain `/ask` to another privacy-enabled bot.
 - Members still need to register privately with `/start` and satisfy the existing
   channel requirement. The bot explains those conditions instead of ignoring them.
-- Settings changes edit the existing settings panel, including in groups.
+- Global settings are managed only by the bot owner in private chat.
 
 ### Image → extracted text → AI
 
@@ -73,29 +152,24 @@ replaced by the newly requested math support.
 
 ### Math formatting
 
-- Display equations in `\[ ... \]` or `$$ ... $$` are rendered into local PNGs.
-- Inline equations become readable text, with fractions kept parenthesized.
-- Code fences and inline code are preserved literally.
-- `/settings` → Math switches between `image` and `unicode`.
-- Mathtext handles a useful subset of LaTeX, not a full TeX document. Unsupported
-  environments/macros fall back to readable text. At most eight display equations
-  are rendered per answer; additional equations use text. No shell or external
-  LaTeX compilation is performed.
+Answers use Telegram's **native rich messages** (`sendRichMessage`), rich drafts
+in private chats and rich message edits for group/inline/guest streaming. Inline
+formulas use `$...$`; display formulas use `$$...$$`. Older `\( ... \)` and
+`\[ ... \]` delimiters are converted outside literal code. Headings, tables,
+lists, code and formulas stay together in the message; equations are no longer
+sent as separate PNGs. The system prompt now requests valid rich Markdown/LaTeX.
 
-### Inline answers
+The admin can select Rich (default) or Unicode globally. Rich messages require a
+recent Telegram client and Bot API server with native rich-message support.
+Explicit rich-format rejection falls back to readable Unicode text. The bridge
+uses PTB 22.8's existing authenticated transport for Bot API 10.3 methods that
+this pinned SDK does not yet expose as Python methods. No alternate bot token
+or user session is used.
 
-In BotFather, configure `@queryaibot`:
-
-1. `/setinline` → enable and set a query placeholder.
-2. `/setinlinefeedback` → **100%** for generation immediately after selection.
-
-Then type `@queryaibot what is photosynthesis?` in any chat and select the result.
-The inline result appears immediately; generation starts after selection, not on
-every keystroke. If feedback is off, tap **Generate answer**. Inline controls check
-ownership, use the same 40-question quota, and never include private conversation
-history. Inline math uses readable text, because an inline text result cannot be
-expanded into multiple photo messages. Long answers have Previous/Next buttons.
-Inline sessions last 30 minutes in memory and expire on restart.
+Long answers are paginated within rich-message limits. Inline/guest sessions last
+30 minutes in memory; pagination is controlled by the original requester. The
+selected inline result returns immediately, then generates the answer; **Generate
+answer** remains a fallback if chosen-result feedback is unavailable.
 
 ### Current-context web answers
 
@@ -193,6 +267,7 @@ New runtime files are created separately:
 | `campaigns.sqlite3` | Campaign definitions, recipient delivery states, blocked-recipient list |
 | `ads.json` | Saved ad text |
 | `bot_settings.json` | Log-channel changes made through `/setlogchannel` |
+| `global_settings.json` | Admin-only global formatting, style, streaming and access mode |
 
 Back up the entire data directory with the bot stopped, including SQLite files.
 The automatic hourly backup covers **user_data.json only**. JSON files use atomic
@@ -202,20 +277,20 @@ User recovery tries readable timestamped backups without changing the source ZIP
 ## 3. Chat features
 
 - Groq streaming: native animated drafts in private chats, throttled message edits
-  in groups or when drafts are unavailable. Streaming displays partial plain text;
-  final replies receive full formatting and are saved as normal messages.
+  in groups or when drafts are unavailable. Streaming uses native rich formatting where supported;
+  finalized replies are persisted as rich messages.
 - Your original **Question Ai** identity and instructions are the first system
   message: short/general answers by default, longer clarification, a few emojis and code without explanations/comments unless asked. Photo support
   is restored. The old no-LaTeX rule is replaced by LaTeX support, as requested.
-  A web-search instruction routes questions needing current context to Felo. User-selected style can override the default response length.
+  A web-search instruction routes questions needing current context to Felo. Admin-selected global style can override the default response length.
 - Groq internal reasoning is not displayed. Only answer `delta.content` is read.
 - Bold, italic, strikethrough, headings, links, spoilers, blockquotes, inline code,
-  and code blocks with language labels use Telegram message entities.
+  and code blocks with language labels use Telegram rich formatting.
 - Code blocks support native Telegram selection/copying. The separate Copy answer
   button has been removed.
 - Long answers are split into Unicode-safe messages, with code and other formatting
-  preserved across boundaries. Tables are displayed as readable text rows.
-- `/stop` cancels generation; one in-flight answer per user prevents quota races.
+  preserved across ordinary boundaries. Tables use native rich Markdown.
+- `/stop` cancels generation; requests queue per user to prevent quota races.
   Other users can ask questions concurrently, up to the configured cap.
 - History survives restarts. Free users retain the latest 6 exchanges; premium
   users retain 35. Older complete exchanges roll out instead of abruptly clearing
@@ -239,8 +314,7 @@ User recovery tries readable timestamped backups without changing the source ZIP
 | `/new`, `/reset` | Stop the current answer and clear this chat/topic's history |
 | `/stop` | Cancel your active answer |
 | `/retry` | Regenerate the latest completed answer |
-| `/settings` | Toggle streaming; cycle balanced/concise/detailed style and low/medium/high reasoning |
-| `/model` | Show the configured Groq model |
+| `/image <prompt>` | Generate an image; supports `/flux` and `/flux2` aliases |
 | `/export` | Download recent saved history as Markdown |
 | `/forget` | Clear this chat/topic's saved history and settings |
 | `/balance` | Show remaining quota and subscription |
@@ -344,6 +418,8 @@ requires admin maintenance; no automatic probing is performed.
 
 | Command | Action |
 |---|---|
+| `/settings` | Private admin-only global preferences and Inline/Guest/Off mode |
+| `/model` | Private admin-only model configuration |
 | `/stats` | User/premium/group totals and active AI request count |
 | `/gencharlie037` | Generate a premium code; admin only |
 | `/resetcount` | Reset all bot quotas |
@@ -429,14 +505,14 @@ python -m unittest discover -s tests -v
 Tests use temporary state and mocked HTTP/Telegram responses. They cover streamed
 Groq responses, auth errors, rate limiting, truncated streams, Markdown entities,
 Unicode splitting, cancellation, retry history, callback ownership, persistent
-campaign recovery, and earlier promo/quota fixes. They never contact Telegram or
+campaign recovery, rich native payloads, guest context isolation, global admin authorization, mode exclusion, image-provider fallback, queued quotas and earlier promo fixes. They never contact Telegram or
 Groq and do not touch the packaged user records. The CI workflow tests Python 3.10
 and 3.12 when the source is pushed to GitHub; local validation used Python 3.12.
 
 Live provider access, Telegram permissions, client rendering, and account-specific
 rate limits still require a run with your configured keys. Changing `GROQ_MODEL`
 requires a model enabled for your Groq account. Reasoning controls are sent only
-for GPT-OSS models. Felo web search and image OCR are included. Code execution, voice, and payments
+for GPT-OSS models. Felo web search, image OCR and fal/getimg image generation are included. Code execution, voice, and payments
 are not included. Local token counting is a character budget, not an exact tokenizer.
 
 User/quota JSON persistence and history/campaign SQLite are separate stores; they
@@ -471,3 +547,13 @@ into a checkout before starting the bot.
 - [Groq GPT-OSS reasoning controls](https://console.groq.com/docs/reasoning)
 - [Telegram Bot API, drafts, entities and copy buttons](https://core.telegram.org/bots/api)
 - [python-telegram-bot documentation](https://docs.python-telegram-bot.org/en/stable/)
+
+### Native API references
+
+- [Telegram rich messages and LaTeX](https://core.telegram.org/bots/api#rich-message-formatting-options)
+- [Telegram guest mode setup](https://core.telegram.org/bots/features#guest-bots)
+- [Guest response API](https://core.telegram.org/bots/api#answerguestquery)
+- [fal FLUX Schnell contract](https://fal.ai/models/fal-ai/flux/schnell/api)
+
+The getimg adapter follows the endpoint/payload supplied with this project; its
+live availability and account permissions must be verified with your own key.

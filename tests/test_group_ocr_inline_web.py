@@ -26,7 +26,7 @@ def fixture(group=True):
            from_user=person,new_chat_members=[],message_thread_id=None,text='/ask hi',message_id=8,
            reply_text=AsyncMock(),reply_photo=AsyncMock(),reply_document=AsyncMock())
     update=NS(effective_message=msg,message=msg,effective_chat=chat,effective_user=person,callback_query=None)
-    bot=NS(id=42,username='queryaibot',send_message=AsyncMock(),get_chat_member=AsyncMock(return_value=NS(status='administrator')),
+    bot=NS(_post=AsyncMock(),id=42,username='queryaibot',send_message=AsyncMock(),get_chat_member=AsyncMock(return_value=NS(status='administrator')),
            edit_message_text=AsyncMock())
     ctx=NS(bot=bot,args=['hi'],application=NS(bot_data={'active_requests':{}}))
     return update,ctx
@@ -155,7 +155,7 @@ class WebMathTests(unittest.IsolatedAsyncioTestCase):
 
 class InlineTests(unittest.IsolatedAsyncioTestCase):
     async def test_inline_query_returns_fast_selection_result(self):
-        u,c=fixture(False);q=NS(query='hello',from_user=NS(id=123),answer=AsyncMock())
+        u,c=fixture(False);q=NS(query='hello',from_user=NS(id=123,is_bot=False),answer=AsyncMock())
         await inline_query(NS(inline_query=q),c)
         self.assertEqual(len(q.answer.call_args.args[0]),1)
         self.assertEqual(len(c.application.bot_data['active_requests']),0)

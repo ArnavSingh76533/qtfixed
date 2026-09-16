@@ -125,6 +125,8 @@ class RegressionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_registration_survives_log_failure(self):
         u=update();c=context();c.bot.send_message.side_effect=BadRequest('no chat')
+        c.application=NS(bot_data={})
+        c.bot.username='queryaibot'
         await primo.log_user_data(u,c)
         self.assertIn('123',primo.load_user_data())
         self.assertEqual(u.message.reply_photo.await_count + u.message.reply_text.await_count, 1)

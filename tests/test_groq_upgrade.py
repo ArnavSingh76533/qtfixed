@@ -116,9 +116,9 @@ class FormattingTests(unittest.TestCase):
 class ChatTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.store=ChatStore(Path(self.temp.name)/'chats.db')
-        self.bot=NS(send_chat_action=AsyncMock(),send_message_draft=AsyncMock(),send_document=AsyncMock())
+        self.bot=NS(_post=AsyncMock(),send_chat_action=AsyncMock(),send_message_draft=AsyncMock(),send_document=AsyncMock())
         self.ctx=NS(bot=self.bot,application=NS(bot_data={'chat_store':self.store,'active_requests':{},'groq':None}))
-        self.u=make_update();self.u.message.reply_text.return_value=NS(delete=AsyncMock(),edit_text=AsyncMock())
+        self.u=make_update();self.u.message.get_bot=lambda:self.bot;self.u.message.reply_text.return_value=NS(message_id=9,delete=AsyncMock(),edit_text=AsyncMock())
         self.user={'user_id':'123','request_count':0,'subscription':'inactive','sub_end':None,'last_request_time':None}
     def tearDown(self):self.store.close();self.temp.cleanup()
 
@@ -174,7 +174,7 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(query.answer.call_args.kwargs['show_alert'])
 
     async def test_draft_fallback_to_edits(self):
-        self.bot.send_message_draft.side_effect=BadRequest('unsupported')
+        self.bot._post.side_effect=BadRequest('unsupported')
         preview=StreamPreview(self.u.message,self.bot,123)
         await preview.start();await preview.update('hello')
         self.assertFalse(preview.draft)

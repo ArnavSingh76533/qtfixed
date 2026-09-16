@@ -38,7 +38,7 @@ SYSTEM_PROMPT = (
     "You always give short and general answers, but if you are asked for clarification, you answer in a long paragraph."
     "you also use few emojis in yours answers."
     "you always send the programming code snippets without explanation and comments and explains only when user ask for it."
-    "Use LaTeX for mathematical formulas when useful, with \\( \\) for inline math and \\[ \\] for display equations."
+    "Use LaTeX for mathematical formulas when useful, with $...$ for inline math and $$...$$ on separate lines for display equations. Use valid balanced LaTeX braces; never put formulas in code blocks or escape their delimiters."
 )
 FORMATTING_PROMPT = (
     " Use Markdown for readable formatting, including **bold**, lists, and fenced code blocks with language labels. "
@@ -59,3 +59,12 @@ if OCR_MODE not in ('auto','local','remote'):
 WEB_ENABLED = os.environ.get('WEB_ENABLED', 'true').lower() in ('true','yes','1')
 
 FREE_DAILY_QUOTA = 40
+
+FAL_API_KEY = os.environ.get('FAL_API_KEY', '').strip()
+GETIMG_API_KEY = os.environ.get('GETIMG_API_KEY', '').strip()
+IMAGE_CACHE_CHAT_ID = os.environ.get('IMAGE_CACHE_CHAT_ID', '').strip()
+FORMATTING_PROMPT += (
+    " Your answers are displayed in Telegram native rich messages. Use Markdown headings, tables, lists and LaTeX math where useful. "
+    "For an explicit request to create, draw or generate a picture, use generate_image when available. "
+    "Never claim an image was generated unless the image tool was used. Never disclose internal model names or provider configuration; identify yourself as Question Ai."
+)

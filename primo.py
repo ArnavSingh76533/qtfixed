@@ -138,20 +138,29 @@ async def log_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
         flush_cache_to_file()
         await notify_log(context.bot, f"A new user with user ID {user_id} has started the bot.")
     
-    caption = ("⚡ Welcome to Question Ai!\n\n"
-               "Ask a question, send a photo, or explore current information with /web. "
-               "I can help with math, science, coding, and more.\n"
-               "Use /settings for streaming, answer style, and math display. "
-               "Try @queryaibot your question from any chat.")
+    user_data_cache[user_id]['dm_started']=True
+    flush_cache_to_file()
+    from runtime_settings import get_settings
+    mode=get_settings(context)['mode']
+    caption = ("<b>Question Ai</b>\n<i>A little curiosity. Endless possibilities.</i>\n\n"
+               "<b>Understand</b> — clear answers, step by step.\n"
+               "<b>Explore</b> — fresh information from the web.\n"
+               "<b>Create</b> — turn your ideas into images.\n\n"
+               "Send a question or a photo to begin.")
+    if mode=='inline':caption+='\n\nBring me into any conversation: <code>@'+context.bot.username+' your question</code>'
+    elif mode=='guest':caption+='\n\nMention <b>@'+context.bot.username+'</b> in a chat and I’ll reply there.'
+    rows=[[InlineKeyboardButton('Guide',callback_data='welcome:help'),InlineKeyboardButton('My balance',callback_data='welcome:balance')]]
+    if str(user_id)==ADMIN_ID:rows.append([InlineKeyboardButton('Admin settings',callback_data='welcome:settings')])
+    markup=InlineKeyboardMarkup(rows)
     banner = Path(__file__).resolve().parent / 'assets' / 'welcome.png'
     if banner.exists():
         try:
             with banner.open('rb') as photo:
-                await update.message.reply_photo(photo,caption=caption)
+                await update.message.reply_photo(photo,caption=caption,parse_mode=ParseMode.HTML,reply_markup=markup)
             return
         except TelegramError:
             logger.warning('Welcome photo could not be sent; using text')
-    await update.message.reply_text(caption)
+    await update.message.reply_text(caption,parse_mode=ParseMode.HTML,reply_markup=markup)
 
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):

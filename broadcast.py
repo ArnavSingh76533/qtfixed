@@ -113,6 +113,7 @@ class BroadcastManager:
         now = dt.datetime.now(dt.timezone.utc)
         if 'user' in options['audience']:
             for uid, original in user_data_cache.items():
+                if original.get('dm_started') is False:continue
                 user = normalize_user(original.copy(), now)
                 premium = user.get('subscription') == 'active'
                 if options['segment'] == 'premium' and not premium:
