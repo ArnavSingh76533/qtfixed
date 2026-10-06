@@ -73,12 +73,42 @@ def artifact(context,owner,path,data):
     cache[token]={'owner':owner,'name':path.rsplit('/',1)[-1],'data':data,'created':now}
     return f'https://t.me/{context.bot.username}?start=file_{token}'
 
+def memory_authorized(request, operation, target):
+    """Direct operation + named target, never generic file-save permission."""
+    text=re.sub(r'```[\s\S]*?```', '', request)
+    text=re.split(r'\b(?:containing|with content|content is)\b',text,flags=re.I)[0]
+    words=lambda value: set(re.findall(r'[\w]+',re.sub(r'([a-z])([A-Z])',r'\1 \2',value).replace('_',' ').casefold()))
+    target_words=words(target)-{'my','the','memory','user'}
+    if not target_words:return False
+    pattern=(r'\b(?:remember|memorize|save\s+(?:in\s+)?(?:my\s+)?memory|store\s+(?:in\s+)?(?:my\s+)?memory)\b|याद\s+रख'
+             if operation=='memory_save' else
+             r'\b(?:forget|delete\s+(?:my\s+)?memory|remove\s+(?:my\s+)?memory|clear\s+(?:my\s+)?memory)\b|भूल')
+    for match in re.finditer(pattern,text,re.I):
+        before=text[max(0,match.start()-35):match.start()]
+        if re.search(r"(?:don't|do not|never|not|मत)\s+(?:please\s+)?$",before,re.I):continue
+        # Quoted instructions or filenames are data, not a direct command.
+        if before.count('"')%2 or before.count('`')%2:continue
+        subject=re.split(r'[;\n]|\b(?:and then|then|containing)\b',text[match.end():],maxsplit=1,flags=re.I)[0]
+        if re.search(r'\b(?:file|script|code)\b|\.[a-zA-Z0-9]{1,8}\b',subject,re.I):continue
+        if target_words.issubset(words(subject)):return True
+    return False
+
+def recover_artifacts(context, owner, run_id):
+    cache=context.application.bot_data.get('agent_artifacts',{})
+    result=[]
+    for row in context.application.bot_data['agent_store'].artifacts(owner,run_id):
+        item=cache.get(row['token'])
+        if (row['expires']>time.time() and item and item['owner']==owner
+                and time.monotonic()-item['created']<=3600):
+            result.append((row['path'],f'https://t.me/{context.bot.username}?start=file_{row["token"]}'))
+    return result
+
 class ToolRuntime:
     def __init__(self,context,owner,user,scope,request,settings):
         self.context,self.owner,self.user,self.scope=context,owner,user,scope
         self.request,self.settings=request,settings
         self.store=context.application.bot_data['agent_store']
-        self.files={};self.exports={};self.exported_content={};self.images=[];self.calls=0
+        self.files={};self.exports={};self.exported_content={};self.images=[];self.calls=0;self.run_id=None
     def registry(self):
         disabled=set()
         if not self.settings['web']:disabled.update(('web_search','fetch_url','browse_url'))
@@ -117,6 +147,9 @@ class ToolRuntime:
                 if self.exported_content.get(path)!=self.files[path]:
                     self.exports[path]=artifact(self.context,self.owner,path,raw)
                     self.exported_content[path]=self.files[path]
+                    if self.run_id:
+                        token=self.exports[path].split('file_',1)[1]
+                        self.store.add_artifact(self.owner,self.run_id,path,token)
                 return {'download':self.exports[path]}
             start=max(0,args.get('offset',0));text=raw.decode('utf-8')
             return {'content':text[start:start+14000],'total_characters':len(text),'next_offset':start+14000 if start+14000<len(text) else None}
@@ -178,7 +211,7 @@ with sync_playwright() as p:
             return {'generated':len(self.images),'delivery':'Will be attached to the final answer by the bot.'}
         if name=='memory_list':return self.store.memories(self.owner,self.scope)
         if name in ('memory_save','memory_delete'):
-            if not re.search(r'\b(remember|forget|memory|save|note|yaad|bhool)\b|याद|भूल',self.request,re.I):raise ValueError('The current user request must explicitly ask to remember/save/forget before changing memory.')
+            if not memory_authorized(self.request,name,args['name']):raise ValueError('Memory changes require a direct remember/forget request naming this specific memory. Saving a file does not grant memory permission.')
             if name=='memory_save':self.store.remember(self.owner,self.scope,args['name'],args['value'])
             else:self.store.forget(self.owner,self.scope,args['name'])
             return {'saved':True,'scope':self.scope}

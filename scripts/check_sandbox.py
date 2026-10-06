@@ -60,7 +60,7 @@ with sync_playwright() as p:
     page=browser.new_page()
     response=page.goto('https://example.com/',wait_until='domcontentloaded',timeout=15000)
     body=page.locator('body').inner_text()
-    assert response.status==200 and 'Example Domain' in body, (response.status,page.url,body[:500])
+    assert response.status==200 and ('documentation examples' in body or 'Example Domain' in body), (response.status,page.url,body[:500])
     response=page.goto('http://169.254.169.254/',wait_until='domcontentloaded',timeout=5000)
     assert response.status==403
     browser.close()

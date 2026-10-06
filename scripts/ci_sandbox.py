@@ -27,6 +27,14 @@ async def main():
     sandbox.check_isolation=verified_ci_daemon
     import config
     config.SANDBOX_ENABLED=True;config.SANDBOX_WEB_ENABLED=True
+    config.SANDBOX_TIMEOUT=30
+    result=await sandbox.execute('import time; time.sleep(26); print("Past old timeout")',{})
+    assert result['exit_code']==0 and 'Past old timeout' in result['stdout'],result
+    config.SANDBOX_TIMEOUT=1
+    result=await sandbox.execute('import time; time.sleep(5)',{})
+    assert result['exit_code']==124 and '1 seconds' in result['stderr'],result
+    config.SANDBOX_TIMEOUT=600
+    print('Configured timeout passed: task beyond 25 seconds; structured timeout at requested limit.')
     result=await sandbox.execute(WEB_CODE,{},network=True)
     assert result['exit_code']==0,result['stderr']
     print('Web container smoke passed: '+result['stdout'].strip())

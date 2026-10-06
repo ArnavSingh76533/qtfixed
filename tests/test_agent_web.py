@@ -166,17 +166,34 @@ class AgentFallbackTests(AgentTestBase):
         self.assertIn('Download report',output);self.assertIn('AI review could not finish',output)
         self.assertEqual(self.store.last_run(123)['status'],'partial')
 
+    async def test_image_and_tool_failure_survive_a_failed_final_review(self):
+        decisions=[{'content':json.dumps({'steps':[{'title':'Generate image'}]})},
+            premium.PlannerTests.tool(self,'generate_image',{'prompt':'moon'},'a'),
+            ProviderError('Decision failed')]
+        async def stream(*args,**kwargs):
+            raise ProviderError('The assistant returned an empty answer.')
+            yield ''
+        self.c.application.bot_data['groq']=NS(complete=AsyncMock(side_effect=decisions),stream=stream)
+        state={}
+        images=[NS(url='https://example.com/moon.jpg')]
+        with patch('agent_tools.available',return_value=True),patch('agent_tools.generate_images',AsyncMock(return_value=images)):
+            output=''.join([x async for x in agent_engine.agent_stream(self.c,self.user,123,'dm',[{'role':'user','content':'Generate moon'}],{'web':True,'reasoning':'low'},AsyncMock(),state)])
+        self.assertEqual(state['runtime'].images,images)
+        self.assertIn('image(s) were generated',output)
+        self.assertIn('Decision failed',output)
+        self.assertEqual(self.store.last_run(123)['status'],'partial')
+
     async def test_invalid_plan_falls_back_and_resource_catalog_is_authoritative(self):
         seen=[]
         async def complete(messages,**kwargs):
             seen.append(messages)
-            return {'content':'{"steps":null}'} if len(seen)==1 else {'content':'No installed skills.'}
+            return {'content':'{"steps":null}'} if len(seen)<=2 else {'content':'No installed skills.'}
         async def stream(messages,**kwargs):yield 'No installed skills.'
         self.c.application.bot_data['groq']=NS(complete=complete,stream=stream)
         state={}
         output=''.join([x async for x in agent_engine.agent_stream(self.c,self.user,123,'dm',[{'role':'user','content':'Any installed skills?'}],{'web':True,'reasoning':'low'},AsyncMock(),state)])
         self.assertIn('No installed skills',output)
-        self.assertIn('Installed resource catalog (only these exist): []',seen[1][0]['content'])
+        self.assertIn('Installed resource catalog (only these exist): []',seen[2][0]['content'])
 
 class NetworkLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_offline_default_and_proxy_worker_has_no_direct_bridge_or_host_mounts(self):

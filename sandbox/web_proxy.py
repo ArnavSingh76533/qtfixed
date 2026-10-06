@@ -67,5 +67,5 @@ class Server(socketserver.ThreadingTCPServer):
 
 if __name__=='__main__':
     with Server(('0.0.0.0',8080),Handler) as server:
-        expiry=threading.Timer(120,server.shutdown);expiry.daemon=True;expiry.start()
+        expiry=threading.Timer(660,server.shutdown);expiry.daemon=True;expiry.start()
         server.serve_forever()

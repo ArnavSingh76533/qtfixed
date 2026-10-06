@@ -35,7 +35,7 @@ async def settings(update,context,edit=False):
         [InlineKeyboardButton('Upload skill',callback_data='personal:skill'),InlineKeyboardButton('Upload agent',callback_data='personal:agent')],
         [InlineKeyboardButton('My skills / agents',callback_data='personal:list')],
         [InlineKeyboardButton('Memory',callback_data='personal:memory'),InlineKeyboardButton('Reminders',callback_data='personal:reminders')]])
-    text=('Your premium agent\n\n'+('Enabled' if prefs['enabled'] else 'Disabled')+' in bot DM, groups, inline and guest replies. '
+    text=('Your premium agent\n\n'+('Enabled' if prefs['enabled'] else 'Disabled')+' for requests starting with “agent” in bot DM, groups, inline and guest replies. '
         'Your choice affects only you; the owner still controls Inline/Guest availability and web access.\n'
         'Timezone: '+prefs['timezone']+' (/timezone to change)\n'
         'Tools: research, calculation, files, memory and reminders. '
@@ -135,7 +135,7 @@ async def memory_command(update,context):
     values=store(context).memories(owner,'dm')
     text='\n'.join(f'{k}: {v}' for k,v in values.items()) or 'No private memories saved.'
     from formatting import formatted_chunks
-    for page,_ in formatted_chunks(text+'\n\nAsk “remember …” with Agent mode ON. /memory clear or /memory delete NAME. Group/guest memory is isolated from DM memory.'):
+    for page,_ in formatted_chunks(text+'\n\nAsk “agent remember …” with Agent mode ON. /memory clear or /memory delete NAME. Group/guest memory is isolated from DM memory.'):
         await update.effective_message.reply_text(page)
 
 async def reminders_command(update,context):
@@ -156,7 +156,7 @@ async def reminders_command(update,context):
     rows=store(context).schedules(owner)
     text='\n'.join(f'{j["id"]} · {j["status"]} · {dt.datetime.fromtimestamp(j["next_run"],timezone(j["timezone"])).isoformat()}\n{j["text"][:160]}' for j in rows) or 'No reminders.'
     from formatting import formatted_chunks
-    for page,_ in formatted_chunks(text+'\n\nAsk for a reminder with Agent mode ON. /reminders cancel ID or /reminders resume ID. Reminders arrive in this bot DM; cron schedules send text, never execute host commands.'):
+    for page,_ in formatted_chunks(text+'\n\nStart with “agent remind me …” with Agent mode ON. /reminders cancel ID or /reminders resume ID. Reminders arrive in this bot DM; cron schedules send text, never execute host commands.'):
         await update.effective_message.reply_text(page)
 
 async def timezone_command(update,context):
@@ -169,8 +169,15 @@ async def timezone_command(update,context):
 
 async def status_command(update,context):
     if not await allowed(update,context):return
-    row=store(context).last_run(update.effective_user.id)
+    owner=update.effective_user.id
+    row=store(context).run(owner,context.args[0]) if context.args else store(context).last_run(owner)
     if not row:return await update.effective_message.reply_text('No agent runs yet. Enable Agent mode in /settings.')
     import json
     plan=json.loads(row['plan'])
     await update.effective_message.reply_text(f'Agent run {row["id"]}: {row["status"]}\n'+'\n'.join(f'{i}. {step["title"]}' for i,step in enumerate(plan,1)))
+    from agent_tools import recover_artifacts
+    links=recover_artifacts(context,owner,row['id'])
+    for path,url in links:
+        await update.effective_message.reply_text(path+'\n'+url)
+    if not links and store(context).artifacts(owner,row['id']):
+        await update.effective_message.reply_text('These download links have expired or the bot restarted. Run the task again to recreate the files.')

@@ -177,11 +177,11 @@ class PlannerTests(AgentTestBase):
                 u,c=fixture(group);u.message.get_bot=lambda:self.c.bot
                 c.application.bot_data=self.c.application.bot_data
                 chats=ChatStore(Path(self.tmp.name)/f'chats{group}.db');c.application.bot_data['chat_store']=chats
-                try:await main.generate_answer(u,c,self.user,'Hello')
+                try:await main.generate_answer(u,c,self.user,'agent Hello')
                 finally:chats.close()
             for mode in ('inline','guest'):
                 self.c.application.bot_data['global_settings']['mode']=mode
-                item={'query':'Hi','owner':123,'mode':mode,'pages':None,'running':True,'agent_scope':'guest:-99:0' if mode=='guest' else 'inline'}
+                item={'query':'agent Hi','owner':123,'mode':mode,'pages':None,'running':True,'agent_scope':'guest:-99:0' if mode=='guest' else 'inline'}
                 await generate_inline(self.c,'id','token',item,self.user)
             self.assertEqual(len(calls),4)
             self.store.set_pref(123,enabled=False)
@@ -297,7 +297,7 @@ class RecoveryTests(AgentTestBase):
         calls=[]
         async def stream(*args,**kwargs):calls.append(1);yield 'Saved answer'
         self.c.application.bot_data.update(groq=NS(stream=stream),web=None)
-        item={'query':'Hi','owner':123,'mode':'guest','pages':None,'running':True,'created':time.monotonic()}
+        item={'query':'agent Hi','owner':123,'mode':'guest','pages':None,'running':True,'created':time.monotonic()}
         self.c.bot._post.side_effect=TimedOut()
         with patch('inline_mode.charge_request') as charge:
             await generate_inline(self.c,'id','token',item,self.user)

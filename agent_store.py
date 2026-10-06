@@ -15,6 +15,7 @@ class AgentStore:
         CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY,owner INTEGER,text TEXT,cron TEXT,timezone TEXT,next_run REAL,status TEXT,failures INTEGER DEFAULT 0);
         CREATE INDEX IF NOT EXISTS due_schedules ON schedules(status,next_run);
         CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,owner INTEGER,scope TEXT,status TEXT,plan TEXT,summary TEXT,created REAL);
+        CREATE TABLE IF NOT EXISTS run_artifacts(owner INTEGER,run_id TEXT,path TEXT,token TEXT,expires REAL,PRIMARY KEY(owner,run_id,path));
         CREATE TABLE IF NOT EXISTS answers(owner INTEGER,scope TEXT,body TEXT,created REAL,PRIMARY KEY(owner,scope));
         ''')
         # A process may have died after sending a reminder but before recording it.
@@ -75,6 +76,17 @@ class AgentStore:
     def last_run(self,owner):
         row=self.db.execute('SELECT * FROM runs WHERE owner=? ORDER BY created DESC LIMIT 1',(owner,)).fetchone()
         return dict(row) if row else None
+    def run(self,owner,identity):
+        row=self.db.execute('SELECT * FROM runs WHERE owner=? AND id=?',(owner,identity)).fetchone()
+        return dict(row) if row else None
+    def add_artifact(self,owner,identity,path,token):
+        if not self.run(owner,identity):raise ValueError('Artifact run does not belong to this owner.')
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO run_artifacts VALUES (?,?,?,?,?)',(owner,identity,path,token,time.time()+3600))
+            self.db.execute('DELETE FROM run_artifacts WHERE expires<?',(time.time(),))
+    def artifacts(self,owner,identity):
+        if not self.run(owner,identity):return []
+        return [dict(r) for r in self.db.execute('SELECT * FROM run_artifacts WHERE owner=? AND run_id=? ORDER BY path',(owner,identity))]
     def save_answer(self,owner,scope,body):
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO answers VALUES (?,?,?,?)',(owner,scope,body[:120000],time.time()))

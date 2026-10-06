@@ -86,7 +86,7 @@ async def generate_inline(context,inline_id,token,item,user):
     import main
     response='';last=0
     settings=get_settings(context)
-    use_agent=agent_engine.enabled(context,user,item['owner'])
+    use_agent=agent_engine.enabled(context,user,item['owner'],item['query'])
     agent_state={'request':item['query']}
     async def status(text):
         try:await asyncio.wait_for(context.bot.edit_message_text(inline_message_id=inline_id,text=text[:3500]),5)
@@ -100,7 +100,9 @@ async def generate_inline(context,inline_id,token,item,user):
     try:
         if not enabled(context,item.get('mode','inline')):
             await status('This access mode was disabled by the admin.');return
-        prompt=item.get('context','')+item['query']
+        task=agent_engine.task_text(item['query']) if use_agent else item['query']
+        if use_agent and not task.strip() and not item.get('document') and not item.get('photo'):raise ProviderError('Add a task after “agent”.')
+        prompt=item.get('context','')+task
         if item.get('document'):
             from documents import read_text_document,prepare_document
             content=await read_text_document(context.bot,item['document'])

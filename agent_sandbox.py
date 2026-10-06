@@ -103,7 +103,7 @@ class Sandbox:
                         if size>limit:raise ValueError('Sandbox output limit exceeded.')
                         chunks.append(chunk)
                 async def interact():
-                    process.stdin.write(json.dumps({'code':code,'mode':mode,'files':files}).encode())
+                    process.stdin.write(json.dumps({'code':code,'mode':mode,'files':files,'timeout':config.SANDBOX_TIMEOUT}).encode())
                     await process.stdin.drain();process.stdin.close()
                     out,err=await asyncio.gather(bounded(process.stdout,12*1024*1024),bounded(process.stderr,32000))
                     await process.wait();return out,err

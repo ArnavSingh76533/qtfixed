@@ -40,7 +40,7 @@ def create_reminder(store,owner,text,when=None,cron=None,tz=None,now=None):
 
 async def tick(application,now=None):
     import primo
-    store=application.bot_data['agent_store'];now=time.time() if now is None else now
+    store=application.bot_data['agent_store'];provided_now=now is not None;now=time.time() if now is None else now
     for job in store.due(now):
         if not store.claim(job['id']):continue
         user=primo.user_data_cache.get(str(job['owner']))
@@ -61,8 +61,8 @@ async def tick(application,now=None):
             store.schedule_status(job['id'],'failed');log_error('Reminder rejected',error)
         else:
             if job['cron']:
-                sent_at=max(now,time.time())
-                store.schedule_status(job['id'],'active',next_cron(job['cron'],job['timezone'],sent_at+299))
+                sent_at=now if provided_now else max(now,time.time())
+                store.schedule_status(job['id'],'active',next_cron(job['cron'],job['timezone'],sent_at))
             else:store.schedule_status(job['id'],'done')
 
 async def run(application):

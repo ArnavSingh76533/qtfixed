@@ -223,9 +223,12 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
     response = ''
     original_prompt=prompt if routing_prompt is None else routing_prompt
     quota_exempt=quota_exempt or bool(document)
-    use_agent=agent_engine.enabled(context,user,update.effective_user.id)
+    use_agent=agent_engine.enabled(context,user,update.effective_user.id,original_prompt)
     agent_state={'request':original_prompt}
     try:
+        if use_agent:
+            prompt=agent_engine.task_text(prompt)
+            if not prompt.strip() and not document and not photo:raise ProviderError('Add a task after “agent”, for example: agent create and test a Python score checker.')
         await preview.start()
         heartbeat = asyncio.create_task(typing_heartbeat(update.effective_message, context.bot))
         if document:

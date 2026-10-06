@@ -28,6 +28,9 @@
 
 Agent mode is for **active bot premium subscriptions**, not Telegram Premium.
 It starts OFF for everyone. Open **/settings in your bot DM → Agent mode ON**.
+Then start a request with **agent**, for example `agent research this site and test a scraper`.
+This explicit prefix is required in DM, groups, inline and guest modes. Other
+messages use normal chat even when the setting is ON.
 The owner has a **My premium agent** button inside their admin panel. The same
 personal toggle applies to your bot DM, group requests, inline requests and guest
 summons. The bot owner's global Inline/Guest mode and web switch still apply.
@@ -50,7 +53,7 @@ pauses while it is off; resume paused jobs explicitly with `/reminders resume ID
 5. **Review:** synthesize the task results, report unfinished work and stream the
    final answer. `/agentstatus` shows the latest plan and run status.
 
-Default limits: 5 planned tasks, 16 tool calls, 7 decisions per task, 360 seconds
+Default limits: 5 planned tasks, 16 tool calls, 7 decisions per task, 900 seconds
 for execution/review. Code containers have their own time and resource limits.
 A stopped/failed task can already have saved a memory, created a reminder, or
 produced a file; those completed actions are not rolled back. Inspect `/memory`,
@@ -155,7 +158,7 @@ Proxy-aware requests/urllib and Chromium use the supplied proxy environment.
 Do not set `trust_env=False` or disable the proxy in generated code. No host files,
 Docker socket, bot tokens or Groq keys are mounted or passed into either container.
 HTTPS connections remain end-to-end TLS; certificate verification stays enabled.
-The proxy has bounded connections, bytes and time, and expires after 120 seconds.
+The proxy has bounded connections, bytes and time, and expires after 660 seconds.
 Containers/networks are cleaned up after execution, failure and cancellation;
 a hard process/server crash may leave an empty internal network to remove later.
 
@@ -174,10 +177,22 @@ The agent does not bypass these blocks and cannot honestly call such a test pass
 AI decisions retry malformed Groq tool calls, invalid JSON, empty responses and
 truncated decisions within a fixed budget. Failed-generation strings are never
 executed. Tool decisions use low reasoning effort with a larger output allowance.
-Final streams retry only before any text is shown. A failed final review retains
+Final streams retry only before any text is shown. Planning-only JSON errors
+receive bounded repair attempts before tools run; exhausted formatting repairs
+use a minimal validated plan. Credential errors are reported separately. A failed final review retains
 completed files/images and returns recorded summaries plus tool receipts instead
-of throwing all completed work away. Non-zero code exits are explicitly failed
+of throwing all completed work away. `/agentstatus` recovers actual exported file
+links from the latest run, including cancelled runs; `/agentstatus RUN_ID` recovers
+a previous run. Links keep their owner checks and expire after one hour or a bot
+restart/cache eviction. Metadata comes from the tool, never model-written tokens. Non-zero code exits are explicitly failed
 tests. These retries cannot guarantee every model/provider request will succeed.
+
+The container receives `SANDBOX_TIMEOUT` instead of a hardcoded 25-second limit.
+Its default and maximum are **600 seconds (10 minutes)** per execution.
+`AGENT_TIMEOUT=900` gives the whole task time for planning and review; increase
+it up to 1800 if needed. Existing `.env` values must be updated explicitly.
+Five-minute recurring reminders now schedule the next cron slot without skipping it.
+Memory saving and deletion require separate explicit requests naming the target.
 
 Upgrade with the old bot stopped and your existing environment activated:
 
@@ -186,6 +201,22 @@ cd ~/qtfixed
 source .venv/bin/activate  # use venv/bin/activate if that is your folder name
 git pull --ff-only
 python -m pip install -r requirements.txt
+python - <<'PYENV'
+from pathlib import Path
+from datetime import datetime
+from shutil import copy2
+from dotenv import set_key
+env = Path('.env')
+if not env.is_file():
+    raise SystemExit('Run from ~/qtfixed with your existing .env')
+backup = env.with_name('.env.before-agent-update-' + datetime.now().strftime('%Y%m%d-%H%M%S'))
+copy2(env, backup)
+backup.chmod(0o600)
+set_key(str(env), 'SANDBOX_TIMEOUT', '600')
+set_key(str(env), 'AGENT_TIMEOUT', '900')
+set_key(str(env), 'SANDBOX_WEB_ENABLED', 'true')
+env.chmod(0o600)
+PYENV
 export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
 docker build -t qtfixed-sandbox:1 ./sandbox
 python scripts/check_sandbox.py --web

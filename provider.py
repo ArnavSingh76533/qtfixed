@@ -11,6 +11,10 @@ class ProviderError(Exception):
     """Safe, user-facing error without credentials or provider response bodies."""
 
 
+class DecisionFormatError(ProviderError):
+    """Exhausted planning-only JSON repairs; safe to use a minimal plan."""
+
+
 class WebSearchRequested(Exception):
     def __init__(self, query):
         self.query = query
@@ -40,14 +44,19 @@ class GroqClient:
                     headers={'Authorization':f'Bearer {self.api_key}'},json=payload)
                 if response.status_code in (429,500,502,503,504) and attempt<2:
                     await asyncio.sleep(2**attempt);continue
-                if response.status_code==400:
+                if response.status_code>=400:
                     try:code=response.json().get('error',{}).get('code','invalid_request')
                     except (ValueError,AttributeError):code='invalid_request'
                     code=re.sub(r'[^a-zA-Z0-9_-]','',str(code))[:60]
-                    logging.getLogger(__name__).warning('Groq decision rejected: HTTP 400, code=%s',code)
-                    if code in ('tool_use_failed','json_validate_failed','json_validation_failed') and attempt<2:
+                    logging.getLogger(__name__).warning('Groq decision rejected: HTTP %s, code=%s',response.status_code,code)
+                    if response.status_code==400 and code in ('tool_use_failed','json_validate_failed','json_validation_failed') and attempt<2:
                         payload['messages']=[*messages,{'role':'system','content':'Your previous decision had invalid tool/JSON formatting. Return a valid response using only the exact available tool names, argument types and JSON schema. Do not repeat actions whose successful results are already in the conversation.'}]
                         await asyncio.sleep(1);continue
+                    if json_mode and response.status_code==400 and code in ('json_validate_failed','json_validation_failed'):
+                        raise DecisionFormatError('Planning JSON repair failed (HTTP 400, '+code+').')
+                    if response.status_code in (401,403):
+                        raise ProviderError('The AI service rejected its credentials (HTTP '+str(response.status_code)+'). Ask the admin to check configuration.')
+                    raise ProviderError('AI decision rejected (HTTP '+str(response.status_code)+', code='+code+'). Completed actions are retained.')
                 response.raise_for_status()
                 choice=response.json()['choices'][0]
                 if choice.get('finish_reason')=='length':
@@ -66,7 +75,7 @@ class GroqClient:
                         if attempt<2:
                             payload['messages']=[*messages,{'role':'system','content':'Return only valid JSON for the requested schema, without Markdown fences or commentary.'}]
                             continue
-                        raise ProviderError('The AI could not return valid planning JSON.') from None
+                        raise DecisionFormatError('The AI could not return valid planning JSON.') from None
                 # Provider reasoning and unrelated metadata are never retained or displayed.
                 return {'role':'assistant','content':message.get('content') or None,**({'tool_calls':calls} if calls else {})}
             except httpx.RequestError:

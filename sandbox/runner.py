@@ -10,6 +10,8 @@ def run():
     root=Path('/workspace')
     if Path.cwd()!=root or os.getuid()!=65534:raise SystemExit('Container-only runner')
     data=json.load(sys.stdin)
+    timeout=data.get('timeout',600)
+    if type(timeout)!=int or not 1<=timeout<=600:raise ValueError('Invalid execution timeout')
     for name,encoded in data['files'].items():
         path=root/name
         if not path.resolve().is_relative_to(root):raise ValueError('Invalid path')
@@ -19,11 +21,11 @@ def run():
     # Output goes to bounded tmpfs files, not unbounded host process pipes.
     with open('/tmp/stdout','w+') as out,open('/tmp/stderr','w+') as err:
         try:
-            process=subprocess.run(['python','-I',str(program)] if data['mode']=='python' else ['/bin/sh',str(program)],stdout=out,stderr=err,timeout=25)
+            process=subprocess.run(['python','-I',str(program)] if data['mode']=='python' else ['/bin/sh',str(program)],stdout=out,stderr=err,timeout=timeout)
             exit_code=process.returncode
         except subprocess.TimeoutExpired:
             exit_code=124
-            err.write('\nExecution exceeded 25 seconds; the code process was stopped.\n')
+            err.write(f'\nExecution exceeded {timeout} seconds; the code process was stopped.\n')
         out.seek(0);err.seek(0)
         result={'exit_code':exit_code,'stdout':out.read(12000),'stderr':err.read(4000),'files':{}}
     total=0
