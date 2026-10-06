@@ -33,6 +33,8 @@ def browser_job(target,path,screenshot=None,actions=None,local=False,pdf=False):
         elif kind=='expect_visible':assert page.locator(selector).is_visible(),selector+' not visible'
         else:raise ValueError('Unknown browser action')
         checks.append({'action':kind,'selector':selector,'passed':True})
+    page.evaluate("async()=>{await Promise.race([Promise.all(Array.from(document.images).map(i=>i.complete?Promise.resolve():new Promise(r=>{i.onload=r;i.onerror=r}))),new Promise(r=>setTimeout(r,4000))]);if(document.fonts)await Promise.race([document.fonts.ready,new Promise(r=>setTimeout(r,4000))]);}")
+    image_checks=page.locator('img').evaluate_all('(nodes)=>nodes.slice(0,50).map(n=>({src:n.currentSrc||n.src,loaded:n.complete&&n.naturalWidth>0}))')
     output=Path(OUTPUT);output.parent.mkdir(parents=True,exist_ok=True)
 '''
     if pdf:
@@ -41,7 +43,7 @@ def browser_job(target,path,screenshot=None,actions=None,local=False,pdf=False):
     from pypdf import PdfReader
     reader=PdfReader(str(output))
     assert len(reader.pages)>0,'PDF has no pages'
-    print(json.dumps({'saved':str(output),'pdf_pages':len(reader.pages),'text_sample':reader.pages[0].extract_text()[:1000],'errors':errors}))
+    print(json.dumps({'saved':str(output),'pdf_pages':len(reader.pages),'text_sample':reader.pages[0].extract_text()[:1000],'errors':errors,'images':image_checks}))
 '''
     else:
         code+='''    html=page.content()
@@ -71,9 +73,9 @@ class Quiet:
     def debug(self,msg):pass
     def warning(self,msg):pass
     def error(self,msg):errors.append(str(msg)[-600:])
-for fmt in ['best[ext=mp4][height<=720]/best[height<=720]','best[ext=mp4][height<=360]/worst']:
+for fmt in ['best[ext=mp4][height<=?720]/best[height<=?720]','best[ext=mp4][height<=?360]/worst']:
     try:
-        options={'outtmpl':str(root),'format':fmt,'noplaylist':True,'max_downloads':1,
+        options={'outtmpl':str(root),'format':fmt,'noplaylist':True,'playlist_items':'1',
             'max_filesize':49_000_000,'socket_timeout':12,'retries':2,'fragment_retries':2,
             'proxy':os.environ['HTTPS_PROXY'],'cachedir':False,'quiet':True,'logger':Quiet(),
             'progress_hooks':[progress],'js_runtimes':{'node':{}},'overwrites':True}

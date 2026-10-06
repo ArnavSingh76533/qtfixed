@@ -89,6 +89,21 @@ class WorkflowTests(AgentTestBase):
         self.u.message.reply_document.assert_awaited_once();self.assertNotIn('data',runtime.documents[0])
         self.assertFalse(execute.call_args.kwargs['network'])
 
+    async def test_missing_pdf_image_is_reported_instead_of_claimed_complete(self):
+        runtime=self.runtime('agent PDF with image');await runtime.execute('write_file',{'path':'a.html','content':'<img src="missing.png">'})
+        self.c.application.bot_data['sandbox']=NS(execute=AsyncMock(return_value={'files':{'a.pdf':b64(b'%PDF-1.7\nfixture')},'exit_code':0,'stdout':json.dumps({'pdf_pages':1,'images':[{'src':'missing.png','loaded':False}]}),'stderr':''}))
+        with patch.object(config,'SANDBOX_ENABLED',True):receipt=await runtime.execute('create_pdf',{'html_path':'a.html','path':'a.pdf'})
+        self.assertIn('embedded images failed',receipt['error'])
+
+    async def test_repaired_export_replaces_stale_queued_bytes(self):
+        runtime=self.runtime('agent make file')
+        await runtime.execute('write_file',{'path':'result.txt','content':'old'})
+        await runtime.execute('export_file',{'path':'result.txt'})
+        await runtime.execute('write_file',{'path':'result.txt','content':'fixed'})
+        await runtime.execute('export_file',{'path':'result.txt'})
+        self.assertEqual(len(runtime.documents),1)
+        self.assertEqual(runtime.documents[0]['data'],b'fixed')
+
     async def test_browser_failure_exposes_error_and_preserves_outputs(self):
         runtime=self.runtime('agent test calculator');await runtime.execute('write_file',{'path':'calc.html','content':'broken'})
         execute=AsyncMock(return_value={'files':{'shot.png':b64(b'actual fixture')},'exit_code':0,'stdout':json.dumps({'page_errors':['missing THREE'],'checks':[],'screenshot':'shot.png'}),'stderr':''})

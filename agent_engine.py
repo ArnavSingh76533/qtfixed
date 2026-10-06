@@ -184,7 +184,7 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
             final_step=index==len(plan)
             needs_execution=bool(final_step and config.SANDBOX_ENABLED and re.search(r'\b(run|execute|test|try|python|script|plot|graph|chart|screenshot|three\.?js|browser-based)\b',runtime.request,re.I))
             needs_media=bool(final_step and re.search(r'\b(plot|graph|chart|screenshot)\b|\b(?:send|upload|download)\b.{0,80}\b(?:image|video|picture|photo)\b',runtime.request,re.I))
-            needs_pdf=bool(final_step and re.search(r'\bpdf\b',runtime.request,re.I))
+            needs_pdf=bool(final_step and re.search(r'\b(create|make|generate|export|send|write|prepare|produce|build)\b.{0,100}\bpdf\b',runtime.request,re.I))
             for turn in range(12):
                 runtime.check_access()
                 try:

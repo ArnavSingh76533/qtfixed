@@ -83,6 +83,11 @@ wrong types are rejected before executing anything. Completed mutations are not
 replayed. Interrupted final reviews retry synthesis once without rerunning tools;
 actual exports remain recoverable if synthesis is unavailable.
 
+Offline browser workers now receive the same 768 MB memory, 256 PIDs,
+1,024 file descriptors and 128 MB temporary storage as network browser workers.
+This fixes offline screenshot failures caused by the smaller ordinary-worker limits.
+CPU, filesystem and network isolation remain enforced.
+
 The new `download_video` handles public video pages rather than just direct MP4
 URLs. It uses the sandbox's proxy, preinstalled yt-dlp/EJS and Node 22, with smaller
 format fallback. Pinterest JavaScript is handled by Chromium; `browse_url` now
@@ -255,7 +260,7 @@ a hard process/server crash may leave an empty internal network to remove later.
 
 Normal Python/shell calls remain offline unless `network=true` is requested.
 Network workers get 768 MB RAM, 256 PIDs and 128 MB temporary storage to support
-Chromium; offline workers and proxy sidecars use 512 MB/128 PIDs. Both have one
+Chromium; offline workers use the same limits. Proxy sidecars use 512 MB/128 PIDs. All have one
 CPU, a read-only root, non-root user, no capabilities and no published ports.
 `requests`, BeautifulSoup, Playwright and system Chromium are included after the
 image is rebuilt. Chromium runs with its inner sandbox disabled inside the
@@ -361,7 +366,7 @@ without runsc. It never falls back to host `exec`, `eval` or a host shell.
 
 Each execution uses a fresh container: no host mounts, no Docker socket, no bot
 credentials, offline by default (public proxy when explicitly requested), read-only root filesystem, all Linux capabilities dropped,
-no new privileges, UID 65534, 512 MB RAM, 1 CPU, 128 PIDs and bounded tmpfs/output.
+no new privileges, UID 65534, 768 MB RAM, 1 CPU, 256 PIDs and bounded tmpfs/output.
 The runner allows up to 25 seconds of code; the outer timeout also covers startup.
 Python stdlib, Pillow, pypdf, python-docx, openpyxl, requests, BeautifulSoup and Playwright/Chromium are included. Shell execution
 runs **inside that container**. Workspace files are explicitly copied between

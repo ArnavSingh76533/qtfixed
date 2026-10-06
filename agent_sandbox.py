@@ -41,12 +41,13 @@ class Sandbox:
         self.verified=True
     def command(self,name,network='none',proxy=None):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:@-]*',config.SANDBOX_IMAGE):raise ValueError('Invalid sandbox image setting.')
+        browser=network!='bridge'  # Offline Chromium needs the same resources as web Chromium.
         command=['docker','run','--rm','--pull=never','--name',name,'--network='+network,
             '--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
-            '--memory='+('768m' if proxy else '512m'),'--memory-swap='+('768m' if proxy else '512m'),'--cpus=1','--pids-limit='+('256' if proxy else '128'),
-            '--ulimit=nofile='+('1024:1024' if proxy else '128:128'),'--ulimit=fsize=64000000:64000000',
+            '--memory='+('768m' if browser else '512m'),'--memory-swap='+('768m' if browser else '512m'),'--cpus=1','--pids-limit='+('256' if browser else '128'),
+            '--ulimit=nofile='+('1024:1024' if browser else '128:128'),'--ulimit=fsize=64000000:64000000',
             '--user=65534:65534','--log-driver=none',
-            '--tmpfs=/tmp:rw,nosuid,nodev,size='+('128m' if proxy else '16m'),
+            '--tmpfs=/tmp:rw,nosuid,nodev,size='+('128m' if browser else '16m'),
             '--tmpfs=/workspace:rw,nosuid,nodev,size=256m,uid=65534,gid=65534,mode=700',
             '--workdir=/workspace','--env=HOME=/workspace','--env=PYTHONDONTWRITEBYTECODE=1','--env=MPLBACKEND=Agg','--env=OPENBLAS_NUM_THREADS=1','--env=OMP_NUM_THREADS=1','--env=MKL_NUM_THREADS=1','--env=NUMEXPR_NUM_THREADS=1','--env=PYTHONPATH=/workspace/.packages','-i']
         if config.SANDBOX_RUNTIME:

@@ -66,6 +66,9 @@ const cube=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshNormalMaterial()
 function animate(){requestAnimationFrame(animate);cube.rotation.y+=.01;renderer.render(scene,camera)}animate();
 document.querySelector('#sum').onclick=()=>document.querySelector('#result').textContent=String(Number(document.querySelector('#a').value)+Number(document.querySelector('#b').value));
 </script>\"\"\"
+from PIL import Image
+Image.new('RGB',(200,100),'blue').save('local-image.png')
+html+='<h1>Verified PDF image</h1><img src=\"local-image.png\">'
 Path('calculator.html').write_text(html)
 """
     result=await sandbox.execute(setup,{},network=True)
@@ -83,7 +86,9 @@ Path('calculator.html').write_text(html)
     files=result['files']
     result=await sandbox.execute(browser_job('file:///workspace/calculator.html','calculator.pdf',pdf=True),files)
     assert result['exit_code']==0,result['stderr']
-    assert json.loads(result['stdout'])['pdf_pages']>=1
+    pdf_receipt=json.loads(result['stdout'])
+    assert pdf_receipt['pdf_pages']>=1
+    assert pdf_receipt['images'] and all(i['loaded'] for i in pdf_receipt['images']),pdf_receipt
     assert base64.b64decode(result['files']['calculator.pdf']).startswith(b'%PDF-')
     print('Actual HTML-to-PDF rendering and PDF inspection passed.')
     result=await sandbox.execute("import subprocess,yt_dlp,yt_dlp_ejs;print(subprocess.check_output(['node','--version']).decode().strip());print(yt_dlp.version.__version__)",{})

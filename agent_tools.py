@@ -171,9 +171,12 @@ class ToolRuntime:
             path=safe_path(args['path'])
             if path not in self.files:raise ValueError('Media file does not exist. Run code or download_media first.')
             raw=base64.b64decode(self.files[path]);kind=await asyncio.to_thread(media_kind,raw,path)
-            if not any(item['path']==path for item in self.media):
+            existing=next((i for i in self.media if i['path']==path),None)
+            item={'path':path,'data':raw,'kind':kind,'caption':args.get('caption',path)[:900]}
+            if existing:existing.clear();existing.update(item)
+            else:
                 if len(self.media)>=4:raise ValueError('At most four media attachments per task.')
-                self.media.append({'path':path,'data':raw,'kind':kind,'caption':args.get('caption',path)[:900]})
+                self.media.append(item)
             receipt=self.export(path,raw)
             return {'queued_media':path,'kind':kind,'bytes':len(raw),'download':receipt['download'],'delivery':'The bot will attach this actual file after the answer; queued is not yet delivered.'}
         if name=='calculator':return {'result':calculate(args['expression'])}
@@ -190,8 +193,8 @@ class ToolRuntime:
             raw=base64.b64decode(self.files[path])
             if name=='export_file':
                 receipt=self.export(path,raw)
-                if not any(i['path']==path for i in self.documents) and not any(i['path']==path for i in self.media):
-                    self.documents.append({'path':path,'data':raw,'kind':'document','caption':path})
+                if not any(i['path']==path for i in self.media):
+                    self.documents=[d for d in self.documents if d['path']!=path]+[{'path':path,'data':raw,'kind':'document','caption':path}]
                 return {**receipt,'queued_document':path}
             start=max(0,args.get('offset',0));text=raw.decode('utf-8')
             return {'content':text[start:start+14000],'total_characters':len(text),'next_offset':start+14000 if start+14000<len(text) else None}
@@ -230,8 +233,10 @@ class ToolRuntime:
                 raw=base64.b64decode(self.files[path])
                 if not raw.startswith(b'%PDF-'):raise ValueError('Output was not a PDF.')
                 exported=self.export(path,raw)
-                if not any(d['path']==path for d in self.documents):self.documents.append({'path':path,'data':raw,'kind':'document','caption':path})
+                self.documents=[d for d in self.documents if d['path']!=path]+[{'path':path,'data':raw,'kind':'document','caption':path}]
                 receipt.update(exported,queued_document=path)
+                if any(not i.get('loaded') for i in receipt.get('images',[])):
+                    receipt['error']='PDF exists, but some embedded images failed to load. Use actual local downloaded images, recreate the PDF and verify again.'
             if name=='inspect_page' and receipt.get('page_errors'):
                 receipt['error']='Browser reported JavaScript errors. Fix and retest before claiming the app works.'
             if name=='search_images' and not receipt.get('images'):
