@@ -17,6 +17,7 @@ class AuthorizationTests(unittest.TestCase):
         for operation in ('memory_save','memory_delete'):
             self.assertFalse(memory_authorized('Save result.txt containing hello',operation,'favorite_color'))
             self.assertFalse(memory_authorized('Save result.txt containing forget favorite color',operation,'favorite_color'))
+            self.assertFalse(memory_authorized('Save a file named forget favorite color',operation,'favorite_color'))
         self.assertTrue(memory_authorized('agent remember my favorite color is blue','memory_save','favorite_color'))
         self.assertFalse(memory_authorized('agent remember my favorite color is blue','memory_delete','favorite_color'))
         self.assertTrue(memory_authorized('agent forget my favorite color','memory_delete','favorite_color'))

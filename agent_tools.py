@@ -84,7 +84,9 @@ def memory_authorized(request, operation, target):
              if operation=='memory_save' else
              r'\b(?:forget|delete\s+(?:my\s+)?memory|remove\s+(?:my\s+)?memory|clear\s+(?:my\s+)?memory)\b|भूल')
     for match in re.finditer(pattern,text,re.I):
-        before=text[max(0,match.start()-35):match.start()]
+        before=re.split(r'[;\n]|\b(?:and then|then)\b',text[:match.start()],flags=re.I)[-1]
+        # Mutation verbs must be direct commands, not words in a file name/payload.
+        if not re.fullmatch(r'\s*(?:(?:agent|एजेंट)\s*[:,;-]?\s*)?(?:(?:please|can you|could you|will you|would you|I want you to)\s+)*',before,re.I):continue
         if re.search(r"(?:don't|do not|never|not|मत)\s+(?:please\s+)?$",before,re.I):continue
         # Quoted instructions or filenames are data, not a direct command.
         if before.count('"')%2 or before.count('`')%2:continue
