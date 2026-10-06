@@ -24,11 +24,14 @@ TOOLS=[
     spec('calculator','Calculate arithmetic exactly as given; no Python execution.',{'expression':'string'},['expression']),
     spec('current_time','Get current UTC time and configured user timezone.',{}),
     spec('list_files','List this task workspace, including selected skill resources.',{}),
+    spec('list_resources','List the actual installed skills and agent instructions for this user, including whether each is enabled. Use this before answering questions about installed resources.',{}),
     spec('read_file','Read a UTF-8 workspace resource; offset is characters.',{'path':'string','offset':'integer'},['path']),
     spec('write_file','Create/update a UTF-8 workspace file; no host filesystem access.',{'path':'string','content':'string'},['path','content']),
     spec('export_file','Make a completed workspace file downloadable to the requesting user.',{'path':'string'},['path']),
-    spec('python','Run Python in the isolated container. Files persist within this task; no network, credentials or host access.',{'code':'string'},['code']),
-    spec('shell','Run a shell command only in the isolated container workspace. No network or host access.',{'command':'string'},['command']),
+    spec('python','Run Python in the isolated container. Set network=true for live public HTTP/HTTPS via its proxy (requests/urllib). No host files or credentials. requests, bs4 and openpyxl are installed.',{'code':'string','network':'boolean'},['code']),
+    spec('shell','Run shell only in the isolated container workspace. Set network=true for proxy-aware public HTTP/HTTPS. No host access.',{'command':'string','network':'boolean'},['command']),
+    spec('fetch_url','Fetch the actual live HTML/JSON/text at a public URL, save the raw body to path, and return readable text, links, status and timestamp. Read the saved file in sections for scripts/embedded data. No browser JavaScript execution.',{'url':'string','path':'string'},['url','path']),
+    spec('browse_url','Render a public web page with sandboxed headless Chromium when fetch_url lacks JavaScript-generated content. Save rendered HTML to path and return visible text, links, HTTP status and timestamp. No logins or CAPTCHA bypass.',{'url':'string','path':'string'},['url','path']),
     spec('web_search','Search current facts; synthesize returned evidence with sources.',{'query':'string'},['query']),
     spec('generate_image','Generate requested images and embed them in this chat after completion.',{'prompt':'string'},['prompt']),
     spec('memory_list','Recall memories for this user in this conversation scope only.',{}),
@@ -78,9 +81,10 @@ class ToolRuntime:
         self.files={};self.exports={};self.exported_content={};self.images=[];self.calls=0
     def registry(self):
         disabled=set()
-        if not self.settings['web']:disabled.add('web_search')
+        if not self.settings['web']:disabled.update(('web_search','fetch_url','browse_url'))
         if not available():disabled.add('generate_image')
         if not config.SANDBOX_ENABLED:disabled.update(('python','shell'))
+        if not config.SANDBOX_ENABLED or not config.SANDBOX_WEB_ENABLED:disabled.add('browse_url')
         return [s for s in TOOLS if s['function']['name'] not in disabled]
     def check_access(self):
         import primo
@@ -95,11 +99,12 @@ class ToolRuntime:
         schema=schemas[name]
         if not isinstance(args,dict) or set(args)-set(schema['properties']) or not set(schema['required']).issubset(args):raise ValueError('Invalid tool arguments.')
         for key,value in args.items():
-            expected=str if schema['properties'][key]['type']=='string' else int
+            expected={'string':str,'integer':int,'boolean':bool}[schema['properties'][key]['type']]
             if type(value)!=expected:raise ValueError('Invalid tool argument type.')
         if name=='calculator':return {'result':calculate(args['expression'])}
         if name=='current_time':return {'utc':dt.datetime.now(dt.timezone.utc).isoformat(),'timezone':self.store.prefs(self.owner)['timezone']}
         if name=='list_files':return {'files':list(self.files)}
+        if name=='list_resources':return {'resources':[{'kind':b['kind'],'name':b['name'],'description':b['description'],'enabled':bool(b['enabled'])} for b in self.store.bundles(self.owner)]}
         if name in ('read_file','write_file','export_file'):
             path=safe_path(args['path'])
             if name=='write_file':
@@ -115,9 +120,51 @@ class ToolRuntime:
                 return {'download':self.exports[path]}
             start=max(0,args.get('offset',0));text=raw.decode('utf-8')
             return {'content':text[start:start+14000],'total_characters':len(text),'next_offset':start+14000 if start+14000<len(text) else None}
+        if name=='browse_url':
+            from public_web import web_url
+            web_url(args['url']);path=safe_path(args['path'])
+            code='''import json, os, datetime
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,
+        args=['--no-sandbox','--disable-dev-shm-usage','--proxy-bypass-list=<-loopback>'],
+        proxy={'server':os.environ['HTTPS_PROXY']})
+    page=browser.new_page()
+    response=page.goto(URL,wait_until='domcontentloaded',timeout=15000)
+    page.wait_for_timeout(1200)
+    html=page.content()
+    if len(html.encode())>2*1024*1024:raise ValueError('Rendered HTML exceeds 2 MB')
+    output=Path(OUTPUT);output.parent.mkdir(parents=True,exist_ok=True);output.write_text(html)
+    print(json.dumps({'url':page.url,'status':response.status if response else None,
+        'title':page.title(),'text':page.locator('body').inner_text(timeout=2000)[:8000],
+        'links':page.locator('a[href]').evaluate_all('(nodes)=>nodes.slice(0,40).map(n=>n.href)'),
+        'fetched_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'note':'Rendered live page; challenge/403 responses are not successful task evidence.'}))
+    browser.close()
+'''
+            code='URL='+repr(args['url'])+'\nOUTPUT='+repr(path)+'\n'+code
+            result=await self.context.application.bot_data['sandbox'].execute(code,self.files,'python',network=True)
+            self.files=result.pop('files')
+            if result['exit_code']!=0:return {**result,'error':'Browser rendering failed. Inspect stderr or use fetch_url; do not claim success.'}
+            try:receipt=json.loads(result['stdout'])
+            except ValueError:raise ValueError('Browser result was unreadable. Use fetch_url or inspect the saved HTML.') from None
+            return {**receipt,'saved':path,'untrusted_content':True}
+        if name=='fetch_url':
+            from agent_web import fetch
+            path=safe_path(args['path'])
+            result=await fetch(args['url'])
+            body=result.pop('body')
+            proposed={**self.files,path:base64.b64encode(body.encode()).decode()};validate_files(proposed)
+            self.files=proposed
+            return {**result,'saved':path,'characters':len(body),'untrusted_content':True}
         if name in ('python','shell'):
-            result=await self.context.application.bot_data['sandbox'].execute(args.get('code',args.get('command')),self.files,name)
-            self.files=result.pop('files');return {**result,'files':list(self.files)}
+            network=args.get('network',False)
+            if network and not self.settings['web']:raise ValueError('The owner disabled web access. Offline execution is still available.')
+            result=await self.context.application.bot_data['sandbox'].execute(args.get('code',args.get('command')),self.files,name,network=network)
+            self.files=result.pop('files')
+            if result['exit_code']!=0:result['error']='Code test failed; inspect stderr, fix the code and retest. Do not claim success.'
+            return {**result,'files':list(self.files)}
         if name=='web_search':
             query=args['query'][:4000];evidence=''
             try:evidence=await self.context.application.bot_data['web'].search(query)

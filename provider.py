@@ -1,6 +1,8 @@
 """Groq SSE client. Only final-answer content is forwarded to Telegram."""
 import asyncio
 import json
+import logging
+import re
 import httpx
 import config
 
@@ -24,12 +26,12 @@ class GroqClient:
     async def close(self):
         await self.client.aclose()
 
-    async def complete(self,messages,tools=None,json_mode=False,max_tokens=1800):
+    async def complete(self,messages,tools=None,json_mode=False,max_tokens=4096):
         """Bounded non-streaming decisions for planning/tool execution; never replay tools."""
         payload={'model':config.GROQ_MODEL,'messages':messages,'stream':False,
                  'max_completion_tokens':max_tokens}
         if config.GROQ_MODEL.startswith('openai/gpt-oss-'):
-            payload.update(include_reasoning=False,reasoning_effort='medium')
+            payload.update(include_reasoning=False,reasoning_effort='low')
         if tools:payload.update(tools=tools,tool_choice='auto',parallel_tool_calls=False)
         if json_mode:payload['response_format']={'type':'json_object'}
         for attempt in range(3):
@@ -38,12 +40,33 @@ class GroqClient:
                     headers={'Authorization':f'Bearer {self.api_key}'},json=payload)
                 if response.status_code in (429,500,502,503,504) and attempt<2:
                     await asyncio.sleep(2**attempt);continue
+                if response.status_code==400:
+                    try:code=response.json().get('error',{}).get('code','invalid_request')
+                    except (ValueError,AttributeError):code='invalid_request'
+                    code=re.sub(r'[^a-zA-Z0-9_-]','',str(code))[:60]
+                    logging.getLogger(__name__).warning('Groq decision rejected: HTTP 400, code=%s',code)
+                    if code in ('tool_use_failed','json_validate_failed','json_validation_failed') and attempt<2:
+                        payload['messages']=[*messages,{'role':'system','content':'Your previous decision had invalid tool/JSON formatting. Return a valid response using only the exact available tool names, argument types and JSON schema. Do not repeat actions whose successful results are already in the conversation.'}]
+                        await asyncio.sleep(1);continue
                 response.raise_for_status()
                 choice=response.json()['choices'][0]
-                if choice.get('finish_reason')=='length':raise ProviderError('Agent decision exceeded the output limit. Try a smaller task.')
+                if choice.get('finish_reason')=='length':
+                    if attempt<2:
+                        payload['max_completion_tokens']=min(max_tokens*2,8192);continue
+                    raise ProviderError('Agent decision exceeded its output limit; any completed actions are retained.')
                 message=choice['message']
                 calls=message.get('tool_calls') or []
                 if not isinstance(calls,list):raise ValueError('invalid tools')
+                if not calls and not (isinstance(message.get('content'),str) and message['content'].strip()):
+                    if attempt<2:await asyncio.sleep(1);continue
+                    raise ProviderError('The AI returned empty decisions after three attempts; completed actions are retained.')
+                if json_mode:
+                    try:json.loads(message.get('content') or '')
+                    except (ValueError,TypeError):
+                        if attempt<2:
+                            payload['messages']=[*messages,{'role':'system','content':'Return only valid JSON for the requested schema, without Markdown fences or commentary.'}]
+                            continue
+                        raise ProviderError('The AI could not return valid planning JSON.') from None
                 # Provider reasoning and unrelated metadata are never retained or displayed.
                 return {'role':'assistant','content':message.get('content') or None,**({'tool_calls':calls} if calls else {})}
             except httpx.RequestError:
@@ -182,6 +205,10 @@ class GroqClient:
                             raise ProviderError('The assistant returned an empty answer. Please retry.')
                         return
                 await asyncio.sleep(delay)
+            except ProviderError as error:
+                recoverable=any(text in str(error) for text in ('interrupted the response','empty answer','before the answer completed'))
+                if emitted or attempt==2 or not recoverable:raise
+                await asyncio.sleep(2**attempt)
             except httpx.RequestError:
                 if emitted or attempt == 2:
                     raise ProviderError('Could not complete the connection to the AI service. Please try again.') from None

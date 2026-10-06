@@ -89,6 +89,7 @@ SANDBOX_IMAGE = os.environ.get('SANDBOX_IMAGE','qtfixed-sandbox:1').strip()
 SANDBOX_RUNTIME = os.environ.get('SANDBOX_RUNTIME','').strip()
 SANDBOX_TIMEOUT = positive_int('SANDBOX_TIMEOUT',30,120)
 SANDBOX_CONCURRENCY = positive_int('SANDBOX_CONCURRENCY',2,8)
+SANDBOX_WEB_ENABLED = os.environ.get('SANDBOX_WEB_ENABLED','true').lower() in ('true','1','yes')
 FORMATTING_PROMPT += (
     ' A request to send/show an image or picture should use generate_image when available, '
     'unless the user explicitly asks for an existing real photograph or image search. '

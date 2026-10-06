@@ -121,6 +121,88 @@ missed occurrence. A send timeout or restart during delivery produces an
 that reminder. Blocked DMs, expired premium and disabled agent mode are handled
 without deleting existing records.
 
+### Live websites, browser rendering and agent recovery
+
+The agent now clarifies short/misspelled requests while building its task list.
+The clarified request cannot authorize extra side effects; original user intent
+still controls memory, reminders and other mutations. Small tasks get a short plan.
+The installed skill/agent catalog is supplied to every specialist and final review;
+it must not invent resources such as an AGENT.md that was never installed.
+
+For website work, the agent can run this complete workflow:
+
+1. `fetch_url(url, path)` retrieves the actual live HTML/JSON/text, saves the raw
+   response in its task workspace, and returns readable text, links, HTTP status
+   and fetch time. Read the saved raw file in sections to inspect embedded data.
+2. `browse_url(url, path)` renders JavaScript pages with headless Chromium inside
+   the sandbox when direct HTML does not contain the requested information.
+3. Write one complete Python script using observed page structure/endpoints.
+4. Test saved HTML offline, then run a live test with `python(network=true)`.
+5. Inspect HTTP status, stdout/stderr and exit code, repair errors, retest, and
+   export the complete code. Static fixtures do not prove live fetching works.
+
+All three fetching paths require the owner's global **Web search ON** setting.
+`SANDBOX_WEB_ENABLED=true` (default) enables sandbox HTTP/browser tests only when
+execution is also enabled. Set it false to retain offline execution and host page
+fetching while disabling sandbox network/browser tests. No new API key is needed.
+
+Network-enabled executions use a new internal Docker network per execution with
+no bridge gateway address, plus a separate trusted proxy sidecar. The worker has
+no direct outbound route. Only the proxy reaches public HTTP/HTTPS ports 80/443;
+it validates every DNS answer and connects to the validated numeric IP, blocking
+private, loopback, link-local, multicast, reserved and cloud metadata destinations.
+Proxy-aware requests/urllib and Chromium use the supplied proxy environment.
+Do not set `trust_env=False` or disable the proxy in generated code. No host files,
+Docker socket, bot tokens or Groq keys are mounted or passed into either container.
+HTTPS connections remain end-to-end TLS; certificate verification stays enabled.
+The proxy has bounded connections, bytes and time, and expires after 120 seconds.
+Containers/networks are cleaned up after execution, failure and cancellation;
+a hard process/server crash may leave an empty internal network to remove later.
+
+Normal Python/shell calls remain offline unless `network=true` is requested.
+Network workers get 512 MB RAM, 128 PIDs and 64 MB temporary storage to support
+Chromium; offline workers and proxy sidecars retain 256 MB/64 PIDs. Both have one
+CPU, a read-only root, non-root user, no capabilities and no published ports.
+`requests`, BeautifulSoup, Playwright and system Chromium are included after the
+image is rebuilt. Chromium runs with its inner sandbox disabled inside the
+existing constrained outer container; rootless Docker or gVisor is still required.
+
+Public access does not guarantee a site permits scraping: a 403, rate limit,
+CAPTCHA, login requirement, missing live score or changed markup must be reported.
+The agent does not bypass these blocks and cannot honestly call such a test passed.
+
+AI decisions retry malformed Groq tool calls, invalid JSON, empty responses and
+truncated decisions within a fixed budget. Failed-generation strings are never
+executed. Tool decisions use low reasoning effort with a larger output allowance.
+Final streams retry only before any text is shown. A failed final review retains
+completed files/images and returns recorded summaries plus tool receipts instead
+of throwing all completed work away. Non-zero code exits are explicitly failed
+tests. These retries cannot guarantee every model/provider request will succeed.
+
+Upgrade with the old bot stopped and your existing environment activated:
+
+```bash
+cd ~/qtfixed
+source .venv/bin/activate  # use venv/bin/activate if that is your folder name
+git pull --ff-only
+python -m pip install -r requirements.txt
+export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+docker build -t qtfixed-sandbox:1 ./sandbox
+python scripts/check_sandbox.py --web
+python main.py
+```
+
+Keep the existing `.env`, JSON and SQLite data. Existing sandbox setup is reused;
+`SANDBOX_WEB_ENABLED` defaults true if missing. `--web` checks live HTTPS through
+requests and Chromium, denial of metadata/loopback, and denial of direct outbound
+connections in addition to the original offline isolation/file checks. Public
+internet must be reachable from the VPS for this optional web smoke test.
+
+Try: **“Read https://www.cricbuzz.com/cricket-match/live-scores, inspect its live
+HTML, write a complete Python score checker, test it against saved HTML and live
+HTTP in the sandbox, fix errors, and give me the code with the actual test result.
+If access is denied or no scores are found, say so instead of claiming it works.”**
+
 ### Install the execution sandbox on Ubuntu
 
 Planning, research, memory, reminders and text-file creation work immediately.
@@ -156,10 +238,10 @@ without runsc. It never falls back to host `exec`, `eval` or a host shell.
    and set `SANDBOX_RUNTIME=runsc`.
 
 Each execution uses a fresh container: no host mounts, no Docker socket, no bot
-credentials, no network, read-only root filesystem, all Linux capabilities dropped,
+credentials, offline by default (public proxy when explicitly requested), read-only root filesystem, all Linux capabilities dropped,
 no new privileges, UID 65534, 256 MB RAM, 1 CPU, 64 PIDs and bounded tmpfs/output.
 The runner allows up to 25 seconds of code; the outer timeout also covers startup.
-Python stdlib, Pillow, pypdf, python-docx and openpyxl are included. Shell execution
+Python stdlib, Pillow, pypdf, python-docx, openpyxl, requests, BeautifulSoup and Playwright/Chromium are included. Shell execution
 runs **inside that container**. Workspace files are explicitly copied between
 steps; host files are never mounted. Container isolation reduces risk; it is not
 an absolute guarantee against kernel/runtime vulnerabilities. Keep the host,

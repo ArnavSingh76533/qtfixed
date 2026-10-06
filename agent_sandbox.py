@@ -39,31 +39,60 @@ class Sandbox:
         if not all(info.get(key) for key in ('MemoryLimit','PidsLimit','CpuCfsQuota')):
             raise ValueError('Docker resource limits are unavailable. Enable memory, PID and CPU cgroup limits before running untrusted code.')
         self.verified=True
-    def command(self,name):
+    def command(self,name,network='none',proxy=None):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:@-]*',config.SANDBOX_IMAGE):raise ValueError('Invalid sandbox image setting.')
-        command=['docker','run','--rm','--pull=never','--name',name,'--network=none',
+        command=['docker','run','--rm','--pull=never','--name',name,'--network='+network,
             '--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
-            '--memory=256m','--memory-swap=256m','--cpus=1','--pids-limit=64',
+            '--memory='+('512m' if proxy else '256m'),'--memory-swap='+('512m' if proxy else '256m'),'--cpus=1','--pids-limit='+('128' if proxy else '64'),
             '--ulimit=nofile=128:128','--ulimit=fsize=8388608:8388608',
             '--user=65534:65534','--log-driver=none',
-            '--tmpfs=/tmp:rw,nosuid,nodev,size=16m',
+            '--tmpfs=/tmp:rw,nosuid,nodev,size='+('64m' if proxy else '16m'),
             '--tmpfs=/workspace:rw,nosuid,nodev,size=32m,uid=65534,gid=65534,mode=700',
             '--workdir=/workspace','--env=HOME=/workspace','--env=PYTHONDONTWRITEBYTECODE=1','-i']
         if config.SANDBOX_RUNTIME:
             if not re.fullmatch(r'[A-Za-z0-9_-]+',config.SANDBOX_RUNTIME):raise ValueError('Invalid sandbox runtime.')
             command+=['--runtime',config.SANDBOX_RUNTIME]
+        if proxy:
+            for key in ('http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY'):
+                command+=['--env='+key+'='+proxy]
+            command+=['--env=NO_PROXY=','--env=no_proxy=']
         return command+[config.SANDBOX_IMAGE,'python','-I','/runner.py']
-    async def execute(self,code,files,mode='python'):
+    async def control(self,*arguments):
+        process=await asyncio.create_subprocess_exec('docker',*arguments,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
+        try:
+            out,err=await asyncio.wait_for(process.communicate(),15)
+            if process.returncode:raise ValueError('Sandbox web setup failed. Rebuild the sandbox image and check Docker networking.')
+            return out.decode().strip()
+        finally:
+            if process.returncode is None:process.kill();await process.wait()
+
+    async def prepare_web(self,network,proxy_name):
+        # No bridge gateway address on the isolated worker network, no published ports.
+        await self.control('network','create','--internal','--opt','com.docker.network.bridge.inhibit_ipv4=true',network)
+        command=self.command(proxy_name,network='bridge')
+        command.remove('-i')
+        command.insert(2,'-d')
+        command[-1]='/web_proxy.py'
+        # Only the trusted proxy sidecar can reach the internet; it resolves/pins public IPs.
+        await self.control(*command[1:])
+        await self.control('network','connect','--alias','qtfixed-proxy',network,proxy_name)
+        readiness="import socket,time\nfor attempt in range(30):\n try:\n  s=socket.create_connection(('127.0.0.1',8080),.5);s.close();break\n except OSError:time.sleep(.1)\nelse:raise SystemExit(1)"
+        await self.control('exec',proxy_name,'python','-I','-c',readiness)
+
+    async def execute(self,code,files,mode='python',network=False):
         if not config.SANDBOX_ENABLED:raise ValueError('Code execution is disabled. The bot owner must install the documented container sandbox and enable SANDBOX_ENABLED. No code ran on the host.')
         if not shutil.which('docker'):raise ValueError('Docker sandbox is unavailable. No code ran.')
         if mode not in ('python','shell') or not isinstance(code,str) or len(code)>30000:raise ValueError('Invalid code or command (maximum 30,000 characters).')
+        if network and not config.SANDBOX_WEB_ENABLED:raise ValueError('Sandbox public web testing is disabled by the owner. Use fetch_url and test saved HTML offline instead.')
         validate_files(files)
         async with self.slots:
             await self.check_isolation()
             name='qtfixed-'+uuid.uuid4().hex
-            command=self.command(name)
+            network_name=name+'-net';proxy_name=name+'-proxy'
             process=None
             try:
+                if network:await self.prepare_web(network_name,proxy_name)
+                command=self.command(name,network_name if network else 'none','http://qtfixed-proxy:8080' if network else None)
                 process=await asyncio.create_subprocess_exec(*command,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.PIPE)
                 async def bounded(stream,limit):
                     chunks=[];size=0
@@ -96,3 +125,7 @@ class Sandbox:
                 except (OSError,asyncio.TimeoutError):pass
                 if process and process.returncode is None:
                     process.kill();await process.wait()
+                if network:
+                    for arguments in (('rm','-f',proxy_name),('network','rm',network_name)):
+                        try:await self.control(*arguments)
+                        except (OSError,ValueError,asyncio.TimeoutError):pass
