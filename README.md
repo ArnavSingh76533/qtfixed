@@ -1,5 +1,192 @@
 # Question Ai — Groq Telegram Bot
 
+## Premium agent mode and delivery reliability
+
+### What changed
+
+- Telegram edits, downloads, rate limits and known pre-send connection failures
+  retry with backoff (four attempts by default). Read/write timeouts on a **new
+  send** are ambiguous, so they are not blindly replayed. The final normal answer
+  edits its existing progress message, which can be retried safely. Additional
+  pages and broadcasts retain conservative duplicate prevention.
+- Telegram connections now have explicit connect/read/write/pool/upload timeouts
+  and a separate polling pool. Optional stream previews are coalesced in background
+  tasks so a slow Telegram edit cannot stall the AI stream.
+- Logs include a redacted error description and file/function/line frames rather
+  than only `AttributeError` or `BadRequest`. Tokens and URLs are removed. Permanent
+  errors such as a missing chat or insufficient permissions are not retried.
+- Completed text is saved for seven days. `/last` in the original chat recovers it
+  without rerunning the AI; `/last external` in your bot DM recovers your latest
+  inline/guest text. Inline/guest Generate retries retain completed pages/media.
+  Provider image URLs can expire; recovery is not permanent image hosting.
+- Up to 16 updates are dispatched concurrently. Generation still runs in a bounded
+  queue: one job per user at a time, up to 8 queued/running per user, 200 total and
+  `MAX_CONCURRENT_REQUESTS` active generations. Different users run concurrently.
+  These bounds prevent unlimited task spawning; they do not guarantee network uptime.
+
+### Enable your agent
+
+Agent mode is for **active bot premium subscriptions**, not Telegram Premium.
+It starts OFF for everyone. Open **/settings in your bot DM → Agent mode ON**.
+The owner has a **My premium agent** button inside their admin panel. The same
+personal toggle applies to your bot DM, group requests, inline requests and guest
+summons. The bot owner's global Inline/Guest mode and web switch still apply.
+Free users keep normal chat. Premium status is rechecked before tool actions and
+scheduler delivery; an expired subscription cannot use the tools.
+
+Turning agent mode OFF cancels your queued/running requests. Reminder delivery
+pauses while it is off; resume paused jobs explicitly with `/reminders resume ID`.
+
+### How a task runs
+
+1. **Plan:** show a short numbered task list before execution.
+2. **Select:** choose relevant personal skill/agent metadata and load the selected
+   instructions/resources. Other users' uploads and private memories are inaccessible.
+3. **Execute in order:** each specialist gets its role, task, appropriate resources,
+   previous task results and allowlisted tools. Multi-agent tasks are **sequential**,
+   using the configured Groq model in separate specialist turns.
+4. **Observe and verify:** tool results/errors return to the model; the next step
+   uses completed findings. Code runs only through the container sandbox.
+5. **Review:** synthesize the task results, report unfinished work and stream the
+   final answer. `/agentstatus` shows the latest plan and run status.
+
+Default limits: 5 planned tasks, 16 tool calls, 7 decisions per task, 360 seconds
+for execution/review. Code containers have their own time and resource limits.
+A stopped/failed task can already have saved a memory, created a reminder, or
+produced a file; those completed actions are not rolled back. Inspect `/memory`,
+`/reminders` and `/agentstatus`. Private chain-of-thought is never displayed.
+Plans/statuses are short work summaries, not hidden model reasoning.
+
+### Tools
+
+| Tool | Behavior |
+|---|---|
+| Web research | Existing Felo search, then Groq browser fallback; obeys owner's web switch |
+| Calculator / current time | Bounded arithmetic; UTC plus your IANA timezone |
+| Workspace files | List/read/write task files; selected skill scripts and references are available |
+| Python / shell | Only in the configured isolated container; never in the bot host process |
+| File export | Complete generated files via owner-bound bot-DM download links |
+| Image generation | Existing image providers and premium image entitlement; attached to the reply |
+| Memory | Explicit remember/forget requests; isolated by owner and conversation scope |
+| Reminders / cron | Persistent one-time or five-field cron **text reminders to your bot DM** |
+
+The scheduler does **not** execute host shell commands or autonomous AI jobs.
+There are no email, payment, deployment or external-account administration tools.
+A skill cannot add permissions or enable unavailable tools through `allowed-tools`.
+Web pages, uploaded instructions and tool output never grant access to another
+user, credentials, Docker flags, host files or unrestricted networking.
+
+### Add skills and specialist instructions from Telegram
+
+- `/skills add` → upload or forward `SKILL.md`, or a ZIP containing `SKILL.md`
+  with optional `scripts/`, `references/` and `assets/` resources.
+- `/skills example` provides a valid starting file. Standard SKILL.md YAML
+  frontmatter requires `name` (lowercase hyphenated) and `description`.
+- `/agents add` → upload/forward any UTF-8 instruction file, or a ZIP containing
+  `AGENT.md` or `AGENTS.md`. Optional YAML name/description lets you name the role.
+- Captioning a document `/skills` or `/agents` also installs it. Upload management
+  only works in your own bot DM and only for active premium subscribers.
+- `/skills list`, `/skills enable NAME`, `/skills disable NAME`, `/skills remove NAME`.
+  The same management actions work with `/agents`. `/skills cancel` exits upload mode.
+- Max 20 installed resources per user; 2 MB packed/unpacked per bundle, 100 archive
+  entries, 512 KB per archive file, 24,000 characters per instruction body.
+  Selected task workspace: 60 files / 8 MB. ZIP traversal, links, hidden files,
+  duplicate entries and special files are rejected. Uploads never execute on install.
+
+This implements the portable instruction/resource pattern, not every vendor's
+plugin format. Network-dependent skills and tools absent from the registry cannot
+run unchanged. Only selected instructions load; resources are read on demand.
+Packages are installed by the owner in the sandbox image, never from untrusted
+skill installation hooks. Files produced in a task can be exported; links expire
+in one hour or on restart, and only the requesting user can download them.
+
+### Memory and reminders
+
+With Agent ON, try: “Remember that I prefer concise explanations” or “Remind me
+tomorrow at 6 PM to revise chemistry.” `/timezone Asia/Kolkata` sets the timezone
+for new jobs; existing jobs keep their saved timezone. The default is Asia/Kolkata.
+For recurring reminders, ask “Every day at 18:30 remind me to revise,” or supply
+`30 18 * * *`. Minimum recurring interval is five minutes; max 30 active/paused
+jobs per user. One-time dates must be within one year.
+
+`/memory` lists private-DM memories; `/memory delete NAME` or `/memory clear` removes
+those memories. DM memory is never injected into groups, inline, or guest replies.
+Groups and guest chats use separate scopes; ask to remember/forget within that
+conversation. Inline memory has a separate user-specific scope.
+
+`/reminders` lists jobs; `/reminders cancel ID` and `/reminders resume ID` manage
+them. On restart, overdue active reminders send once instead of replaying every
+missed occurrence. A send timeout or restart during delivery produces an
+**uncertain** state, not an automatic duplicate. If needed, cancel and recreate
+that reminder. Blocked DMs, expired premium and disabled agent mode are handled
+without deleting existing records.
+
+### Install the execution sandbox on Ubuntu
+
+Planning, research, memory, reminders and text-file creation work immediately.
+Executing code requires **rootless Docker with working cgroup limits**, or a
+configured **gVisor `runsc`** runtime. The bot refuses a plain rootful daemon
+without runsc. It never falls back to host `exec`, `eval` or a host shell.
+
+1. Install Docker and the rootless prerequisites for your Ubuntu release using
+   the official [rootless Docker guide](https://docs.docker.com/engine/security/rootless/).
+   Run rootless setup under the **same Linux user that runs the bot**. Enable its
+   user service and lingering if the bot must survive logout. Rootless CPU/memory/
+   PID limits require cgroup v2 and systemd delegation; the bot checks support.
+2. From the project directory, build the local image (the bot never auto-pulls):
+
+   ```bash
+   docker build -t qtfixed-sandbox:1 sandbox
+   ```
+
+3. Add to your existing `.env` without replacing credentials/data:
+
+   ```dotenv
+   SANDBOX_ENABLED=true
+   SANDBOX_IMAGE=qtfixed-sandbox:1
+   SANDBOX_CONCURRENCY=2
+   # Substitute the numeric UID of the user running the bot (run: id -u).
+   DOCKER_HOST=unix:///run/user/1000/docker.sock
+   ```
+
+4. In the bot virtual environment, run `python scripts/check_sandbox.py`. It checks
+   real execution, a non-root UID, no network/credentials, read-only root and output
+   files. `/health` is an additional owner-only queue/isolation diagnostic. Restart
+   the bot after the test passes. For gVisor, configure Docker's runtime separately
+   and set `SANDBOX_RUNTIME=runsc`.
+
+Each execution uses a fresh container: no host mounts, no Docker socket, no bot
+credentials, no network, read-only root filesystem, all Linux capabilities dropped,
+no new privileges, UID 65534, 256 MB RAM, 1 CPU, 64 PIDs and bounded tmpfs/output.
+The runner allows up to 25 seconds of code; the outer timeout also covers startup.
+Python stdlib, Pillow, pypdf, python-docx and openpyxl are included. Shell execution
+runs **inside that container**. Workspace files are explicitly copied between
+steps; host files are never mounted. Container isolation reduces risk; it is not
+an absolute guarantee against kernel/runtime vulnerabilities. Keep the host,
+Docker and any gVisor runtime updated.
+
+### Upgrade without losing data
+
+Stop the old bot, activate its existing venv, then:
+
+```bash
+cd ~/qtfixed
+git pull --ff-only
+python -m pip install -r requirements.txt
+```
+
+Keep `.env`, JSON and SQLite files in the same `DATA_DIR`; do not replace them
+with sample files. Agent state is stored separately in `agent_state.sqlite3`.
+Include this database and its WAL/SHM files in your stopped-bot backups. Existing
+subscriptions, counts, groups, campaigns and conversations remain supported.
+
+Architecture references: [Agent Skills specification](https://github.com/agentskills/agentskills),
+[agent loop / tool / handoff patterns](https://github.com/openai/openai-agents-python),
+[Groq tool use](https://console.groq.com/docs/tool-use/overview),
+[Telegram HTTP transport](https://docs.python-telegram-bot.org/en/stable/telegram.request.httpxrequest.html).
+This implementation uses Groq directly; it does not require an OpenAI API key.
+
+
 A Telegram assistant for text, images, math, and current-context web answers using **Groq `openai/gpt-oss-120b`**, your original
 **Question Ai system prompt**, live streaming, native Telegram formatting, saved
 conversations, and persistent broadcast campaigns.
@@ -28,7 +215,7 @@ Restart your bot process. Keep your existing `DATA_DIR`, JSON files, databases a
   setup by default (`WEB_ENABLED` supplies the initial value). Saved admin choices
   take precedence after restart. This applies to normal, inline, guest and `/web`
   requests, including the backup. Already-running requests finish with their
-  captured settings. The custom system-prompt switch is on the same admin-only panel.
+  captured settings. Personal agent settings are separate from the owner’s global controls.
 - **Text files:** send a UTF-8 `.txt`, optionally with instructions in the caption,
   or reply to one with `/ask your question`. Guest requests also accept the text
   attachment supplied by Telegram. **Text-file questions and their retries have no
@@ -68,30 +255,13 @@ Restart your bot process. Keep your existing `DATA_DIR`, JSON files, databases a
   delete the source until the campaign completes. Partial album copies become
   uncertain deliveries, preventing automatic duplicate sends.
 
-### Custom system prompt: /agents
+### Personal premium agents replace the old global prompt
 
-Only the configured **bot owner (`ADMIN_ID`)** can install, change, disable or
-clear this prompt. Other group administrators cannot change it.
-
-1. Send `/agents`, then upload any **UTF-8 plain-text file**, regardless of its
-   filename/extension, in the same chat within ten minutes. You can also reply to
-   a file with `/agents`, or upload the file with caption `/agents`.
-2. The uploaded text **replaces the default base system prompt for all groups and
-   all guest replies**, including guests in personal chats. Ordinary bot DMs and
-   ordinary inline queries keep the original system prompt. Formatting/tool-use
-   instructions and admin settings still apply.
-3. `/agents status` shows whether a custom prompt is active. `/agents clear`
-   restores the original default. `/agent` remains a compatibility alias.
-4. In the owner's private `/settings`, use **Upload system prompt**, **Custom
-   prompt ON/OFF**, or **Restore default prompt**. Disabling retains the saved
-   prompt for later; clearing removes the active override.
-
-This is a system instruction, not an executable agent. It persists in
-`system_prompt.json`. The previous global `group_agents.json` override is imported
-if no new prompt file exists; legacy per-group records remain untouched but no
-longer apply. In-flight requests use their captured prompt. Custom instructions
-have a 60,000-character model-context allowance, separate from quota-free question
-files. Telegram privacy and group enablement still determine message delivery.
+The global custom system-prompt override and singular `/agent` command have been
+removed. `system_prompt.json` and `group_agents.json` remain untouched on disk but
+are no longer loaded. Normal chat uses the original Question Ai system prompt in
+every mode. `/agents` now manages **personal premium specialist instructions**;
+it does not change anyone else's prompt. See the premium agent guide above.
 
 Provider and Telegram calls are mocked in the tests; live delivery still depends
 on your deployed credentials, server/API version and bot permissions.
@@ -100,10 +270,10 @@ on your deployed credentials, server/API version and bot permissions.
 
 Update with `git pull`, install `requirements.txt`, fill the new image keys in
 `.env`, and restart. Open **/settings in the bot owner's private chat**. These
-settings apply globally: web search, custom group/guest prompt, streaming, answer style, reasoning and Rich/Unicode
-formatting. Old per-chat settings are retained on disk but no longer applied.
-Regular users cannot open settings, change them through old buttons, or use
-`/model`. Public menus and answer buttons contain no settings/model controls.
+owner settings apply globally: web search, streaming, answer style, reasoning and Rich/Unicode
+formatting. Premium subscribers also get their own agent panel in private /settings. Old per-chat settings are retained on disk but no longer applied.
+Regular users cannot change global settings through old buttons or use `/model`.
+Personal agent settings require an active bot premium subscription. Public menus and answer buttons contain no settings/model controls.
 
 ### Pick exactly one external access mode
 
@@ -376,7 +546,8 @@ New runtime files are created separately:
 | `ads.json` | Saved ad text |
 | `bot_settings.json` | Log-channel changes made through `/setlogchannel` |
 | `global_settings.json` | Admin-only global formatting, style, streaming, web and access mode |
-| `system_prompt.json` | Owner-uploaded base system prompt for all groups and guest replies |
+| `system_prompt.json`, `group_agents.json` | Preserved legacy files, no longer loaded |
+| `agent_state.sqlite3` | Personal preferences, skills/agents, scoped memories, reminder jobs, run summaries and seven-day answer recovery |
 
 Back up the entire data directory with the bot stopped, including SQLite files.
 The automatic hourly backup covers **user_data.json only**. JSON files use atomic
@@ -532,7 +703,7 @@ requires admin maintenance; no automatic probing is performed.
 |---|---|
 | `/settings` | Private admin-only global preferences and Inline/Guest/Off mode |
 | `/model` | Private admin-only model configuration |
-| `/agents`, `/agents status`, `/agents clear` | Upload, inspect or clear the global group/guest system prompt |
+| `/health` | Private owner-only queue and sandbox diagnostics |
 | `/stats` | User/premium/group totals and active AI request count |
 | `/gencharlie037` | Generate a premium code; admin only |
 | `/resetcount` | Reset all bot quotas |

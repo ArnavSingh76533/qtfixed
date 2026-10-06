@@ -80,6 +80,15 @@ FORMATTING_PROMPT += (
 # Used only when OCR is weak or a question needs visual details.
 GROQ_VISION_MODEL = os.environ.get('GROQ_VISION_MODEL', 'qwen/qwen3.8-27b').strip()
 VISION_ENABLED = os.environ.get('VISION_ENABLED', 'true').lower() in ('true','1','yes')
+TELEGRAM_RETRIES = positive_int('TELEGRAM_RETRIES',4,6)
+AGENT_MAX_STEPS = positive_int('AGENT_MAX_STEPS',5,8)
+AGENT_MAX_TOOL_CALLS = positive_int('AGENT_MAX_TOOL_CALLS',16,40)
+AGENT_TIMEOUT = positive_int('AGENT_TIMEOUT',360,900)
+SANDBOX_ENABLED = os.environ.get('SANDBOX_ENABLED','false').lower() in ('true','1','yes')
+SANDBOX_IMAGE = os.environ.get('SANDBOX_IMAGE','qtfixed-sandbox:1').strip()
+SANDBOX_RUNTIME = os.environ.get('SANDBOX_RUNTIME','').strip()
+SANDBOX_TIMEOUT = positive_int('SANDBOX_TIMEOUT',30,120)
+SANDBOX_CONCURRENCY = positive_int('SANDBOX_CONCURRENCY',2,8)
 FORMATTING_PROMPT += (
     ' A request to send/show an image or picture should use generate_image when available, '
     'unless the user explicitly asks for an existing real photograph or image search. '

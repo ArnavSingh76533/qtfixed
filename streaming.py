@@ -1,5 +1,6 @@
 """Native private-chat drafts and throttled message-edit fallback."""
 import time
+import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.error import BadRequest, RetryAfter, TelegramError
 import config
@@ -16,6 +17,9 @@ class StreamPreview:
         self.last_update = 0
         self.next_update = 0
         self.last_text = ''
+        self.keep_status = False
+        self.pending_text=None
+        self.preview_task=None
         self.draft = config.DRAFT_STREAMING and message.chat.type == 'private'
         self.draft_id = message.message_id or 1
 
@@ -26,11 +30,36 @@ class StreamPreview:
     async def set_status(self,text):
         markup=InlineKeyboardMarkup([[InlineKeyboardButton('⏹ Stop',callback_data=f'chat:stop:{self.owner}',style='danger')]])
         try:
-            await self.status.edit_text(text,reply_markup=markup)
-        except TelegramError:
+            if self.status:await asyncio.wait_for(self.status.edit_text(text[:3500],reply_markup=markup),5)
+        except (TelegramError,asyncio.TimeoutError):
             pass
 
     async def update(self, text):
+        if not self.enabled:return
+        self.pending_text=text
+        if not self.preview_task or self.preview_task.done():
+            self.preview_task=asyncio.create_task(self._pump())
+        await asyncio.sleep(0)
+
+    async def _pump(self):
+        try:
+            while self.pending_text is not None:
+                text=self.pending_text;self.pending_text=None
+                await self._render(text)
+                await asyncio.sleep(1.3)
+        except asyncio.CancelledError:raise
+        except TelegramError:pass
+        except Exception as error:
+            from telegram_delivery import log_error
+            log_error('Preview update failed',error)
+
+    async def finish_updates(self):
+        self.pending_text=None
+        if self.preview_task:
+            self.preview_task.cancel()
+            await asyncio.gather(self.preview_task,return_exceptions=True)
+
+    async def _render(self, text):
         now = time.monotonic()
         if not self.enabled or now < self.next_update or now-self.last_update < 1.3:
             return
@@ -68,8 +97,30 @@ class StreamPreview:
             pass
 
     async def close(self):
-        if self.status:
+        await self.finish_updates()
+        if self.status and not self.keep_status:
             try:
                 await self.status.delete()
             except TelegramError:
                 pass
+
+
+class LatestPreview:
+    """Coalesce optional inline previews without blocking model streaming."""
+    def __init__(self,render):self.render=render;self.task=None;self.latest=None
+    async def update(self,text):
+        self.latest=text
+        if not self.task or self.task.done():self.task=asyncio.create_task(self.run())
+        await asyncio.sleep(0)
+    async def run(self):
+        try:
+            while self.latest is not None:
+                text=self.latest;self.latest=None
+                try:await self.render(text)
+                except TelegramError:pass
+                await asyncio.sleep(1.5)
+        except asyncio.CancelledError:raise
+    async def close(self):
+        self.latest=None
+        if self.task:
+            self.task.cancel();await asyncio.gather(self.task,return_exceptions=True)

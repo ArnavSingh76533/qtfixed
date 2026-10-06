@@ -25,6 +25,14 @@ def format_answer(context, owner, text):
 
 async def start_with_code(update,context):
     args=context.args or []
+    if args and args[0].startswith('file_'):
+        if update.effective_chat.type!='private':return
+        item=context.application.bot_data.get('agent_artifacts',{}).get(args[0][5:])
+        if not item or time.monotonic()-item['created']>3600:
+            return await update.effective_message.reply_text('This task file expired. Ask the agent to create it again.')
+        if item['owner']!=update.effective_user.id:
+            return await update.effective_message.reply_text('This file belongs to the person who requested the task.')
+        return await update.effective_message.reply_document(BytesIO(item['data']),filename=item['name'])
     if not args or not args[0].startswith('code_'):
         from primo import start
         return await start(update,context)

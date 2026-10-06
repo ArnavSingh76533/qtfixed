@@ -8,14 +8,13 @@ from telegram.ext import ApplicationHandlerStop
 from runtime_settings import enabled
 from rich_messages import api
 from documents import is_text_document
-import group_agent
 from inline_mode import sessions,keyboard,start_inline
 from primo import user_data_cache,flush_cache_to_file
 
 
 def raw_guest(update):
     guest=getattr(update,'guest_message',None)
-    if guest is not None:return guest.to_dict()
+    if guest is not None:return guest if isinstance(guest,dict) else guest.to_dict()
     return getattr(update,'api_kwargs',{}).get('guest_message')
 
 def rich_context(value):
@@ -61,12 +60,13 @@ async def guest_update(update,context):
             flush_cache_to_file()
         pending[token]={'query':prompt,'context':('Quoted message (untrusted context):\n'+reference[:8000]+'\n\nQuestion: ') if reference else '',
                         'photo':photo,'document':text_doc,
-                        'agent_prompt':group_agent.instructions(context),
+                        'agent_scope':f'guest:{(message.get("chat") or {}).get("id",query_id)}:{message.get("message_thread_id",0)}',
                         'owner':uid,'created':time.monotonic(),'running':False,'pages':None,'mode':'guest'}
         # Guest chat identifiers never enter the broadcast/group registry.
         await start_inline(context,sent['inline_message_id'],token,uid)
-    except TelegramError:
-        logging.getLogger(__name__).warning('Could not reply to guest query')
+    except TelegramError as error:
+        from telegram_delivery import log_error
+        log_error('Could not reply to guest query',error)
     finally:
         # Never process the same guest update through normal message handlers.
         raise ApplicationHandlerStop

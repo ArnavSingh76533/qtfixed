@@ -151,6 +151,7 @@ async def log_user_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif mode=='guest':caption+='\n\nMention <b>@'+context.bot.username+'</b> in a chat and I’ll reply there.'
     rows=[[InlineKeyboardButton('Guide',callback_data='welcome:help'),InlineKeyboardButton('My balance',callback_data='welcome:balance')]]
     if str(user_id)==ADMIN_ID:rows.append([InlineKeyboardButton('Admin settings',callback_data='welcome:settings')])
+    elif user_data_cache[user_id].get('subscription')=='active':rows.append([InlineKeyboardButton('My agent settings',callback_data='welcome:settings')])
     markup=InlineKeyboardMarkup(rows)
     banner = Path(__file__).resolve().parent / 'assets' / 'welcome.png'
     if banner.exists():

@@ -123,7 +123,7 @@ async def generate_images(context,owner,user,prompt,original_prompt=None):
     await log_prompt(context,owner,original_prompt or prompt)
     return await asyncio.wait_for(context.application.bot_data['images'].generate(prompt,image_count(user)),180)
 
-async def deliver_images(message,images,prompt,context=None,owner=None):
+async def deliver_images(message,images,prompt,context=None,owner=None,target=None):
     if context is not None:
         from rich_messages import api
         try:ids=await cache_images(context,owner,images)
@@ -131,14 +131,22 @@ async def deliver_images(message,images,prompt,context=None,owner=None):
             ids=[getattr(img,'url','') for img in images]
         try:
             if not all(ids):raise BadRequest('No cached rich media')
-            await api(context.bot,'sendRichMessage',chat_id=message.chat_id,
-                message_thread_id=message.message_thread_id,rich_message=image_rich(ids,prompt),
-                reply_parameters={'message_id':message.message_id,'allow_sending_without_reply':True})
+            if target:
+                await api(context.bot,'editMessageText',chat_id=message.chat_id,message_id=target.message_id,
+                    rich_message=image_rich(ids,prompt),reply_markup={'inline_keyboard':[]})
+            else:
+                await api(context.bot,'sendRichMessage',chat_id=message.chat_id,
+                    message_thread_id=message.message_thread_id,rich_message=image_rich(ids,prompt),
+                    reply_parameters={'message_id':message.message_id,'allow_sending_without_reply':True})
             return
         except BadRequest:
             # Definitive rejection: use a normal photo/album in the same chat.
             # Do not retry network timeouts here: the rich message may have arrived.
             logger.warning('Rich image rejected; sending native photo in the same chat')
+        if target and len(images)==1:
+            media=ids[0] if ids and ids[0] else BytesIO(images[0])
+            await context.bot.edit_message_media(chat_id=message.chat_id,message_id=target.message_id,media=InputMediaPhoto(media))
+            return
     # Retained for callers that only provide a Message (never sends to another chat).
     caption='🎨 '+prompt[:850]
     if len(images)==1:

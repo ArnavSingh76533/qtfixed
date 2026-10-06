@@ -27,7 +27,8 @@ async def read_text_document(bot,doc,max_chars=None):
     file=await bot.get_file(info['file_id'])
     if (getattr(file,'file_size',None) or 0)>MAX_TEXT_BYTES:
         raise ProviderError('Telegram bot downloads support files up to 20 MB. Send a smaller text file.')
-    raw=LimitedBuffer();await file.download_to_memory(raw)
+    from telegram_delivery import download_into
+    raw=LimitedBuffer();await download_into(file,raw)
     try:text=raw.getvalue().decode('utf-8-sig')
     except UnicodeDecodeError:
         raise ProviderError('Please save the file as UTF-8 text and send it again.') from None

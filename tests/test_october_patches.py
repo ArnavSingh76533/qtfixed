@@ -11,7 +11,7 @@ import httpx
 from telegram import Document, Update
 from telegram.ext import ApplicationHandlerStop
 from telegram.error import NetworkError, BadRequest
-import main, config, group_agent, broadcast
+import main, config, broadcast
 from answer_engine import answer_stream
 from provider import GroqClient, ProviderError
 from runtime_settings import initialize, get_settings
@@ -94,20 +94,6 @@ class FileAgentTests(unittest.IsolatedAsyncioTestCase):
         for content in (b'\xff',b'',b'hello\x00world',b'x'*(MAX_TEXT_BYTES+1)):
             with self.assertRaises(ProviderError):await read_text_document(self.bot_file(content),doc)
 
-    async def test_admin_agent_save_scope_restart_clear_and_permissions(self):
-        u,c=fixture();u.message.reply_to_message=NS(document=Document('file','unique',file_name='agent.md'))
-        c.args=[];c.bot.get_file=self.bot_file(b'Answer as a chemistry tutor.').get_file
-        with tempfile.TemporaryDirectory() as d,patch.object(config,'DATA_DIR',Path(d)),patch.object(main,'ADMIN_ID','999'):
-            await group_agent.agent_command(u,c);c.bot.get_file.assert_not_awaited()
-            with patch.object(main,'ADMIN_ID','123'):
-                await group_agent.agent_command(u,c)
-                restarted=NS(bot_data={});group_agent.initialize(restarted)
-                self.assertEqual(restarted.bot_data['external_system_prompt'],'Answer as a chemistry tutor.')
-                self.assertEqual(group_agent.instructions(c,-1),'Answer as a chemistry tutor.')
-                c.application.bot_data['global_settings']={'group_agent':False}
-                self.assertEqual(group_agent.instructions(c,-100123),'')
-                c.args=['clear'];await group_agent.agent_command(u,c)
-                self.assertEqual(c.application.bot_data['external_system_prompt'],'')
 
     async def test_text_handler_and_ask_reply(self):
         u,c=fixture(False);u.message.caption='summarize';u.message.document=Document('f','u',file_name='a.txt')

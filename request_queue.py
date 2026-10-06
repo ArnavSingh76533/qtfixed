@@ -25,9 +25,10 @@ def submit(context, owner, scope, work):
                     await work()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
             # Never emit request bodies or provider URLs/credentials in logs.
-            logger.error('Queued request failed unexpectedly')
+            from telegram_delivery import log_error
+            log_error('Queued request failed',error)
         finally:
             active.pop(key, None)
             if not any(owner_of(k) == owner for k in active): locks.pop(owner, None)

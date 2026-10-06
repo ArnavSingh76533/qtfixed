@@ -15,7 +15,9 @@ from rich_messages import rich_pages, edit_rich, with_code_copy, fallback_markdo
 from image_generation import ImageRequested, generate_images, cache_images, image_rich
 import config
 import code_downloads
-import group_agent
+import agent_engine
+from telegram_delivery import log_error, download_into
+from streaming import LatestPreview
 
 
 def sessions(context):
@@ -84,11 +86,17 @@ async def generate_inline(context,inline_id,token,item,user):
     import main
     response='';last=0
     settings=get_settings(context)
-    if item.get('mode')=='guest' and settings['group_agent']:
-        settings['agent_prompt']=group_agent.instructions(context)
+    use_agent=agent_engine.enabled(context,user,item['owner'])
+    agent_state={'request':item['query']}
     async def status(text):
-        try:await context.bot.edit_message_text(inline_message_id=inline_id,text=text)
-        except TelegramError:pass
+        try:await asyncio.wait_for(context.bot.edit_message_text(inline_message_id=inline_id,text=text[:3500]),5)
+        except (TelegramError,asyncio.TimeoutError):pass
+    async def render_preview(text):
+        if settings['math']=='rich':
+            preview=next(iter(rich_pages(text)), '⚡ Working…')
+            await edit_rich(context.bot,inline_message_id=inline_id,text=preview)
+        else:await status(readable_math(text[-1700:]))
+    preview_worker=LatestPreview(render_preview)
     try:
         if not enabled(context,item.get('mode','inline')):
             await status('This access mode was disabled by the admin.');return
@@ -105,29 +113,37 @@ async def generate_inline(context,inline_id,token,item,user):
             if photo.get('file_size',0)>10*1024*1024:raise ProviderError('Please use an image smaller than 10 MB.')
             await status('⚡ Reading image…')
             file=await context.bot.get_file(photo['file_id']);raw=BytesIO()
-            await file.download_to_memory(raw)
+            await download_into(file,raw)
             prompt=await analyze_image(context.application.bot_data['groq'],raw.getvalue(),prompt,status)
         async def consume():
             nonlocal response,last
-            async for part in answer_stream(context.application.bot_data['groq'],context.application.bot_data.get('web'),
+            source=agent_engine.agent_stream(context,user,item['owner'],item.get('agent_scope','inline'),
+                    main.provider_messages([],prompt,settings),settings,status,agent_state) if use_agent else answer_stream(context.application.bot_data['groq'],context.application.bot_data.get('web'),
                     main.provider_messages([],prompt,settings),reasoning=settings['reasoning'],on_status=status,
-                    web_enabled=settings['web'],routing_prompt=item['query']):
+                    web_enabled=settings['web'],routing_prompt=item['query'])
+            async for part in source:
                 response+=part
                 if len(response)>100000:raise ProviderError('Answer is too large. Ask a narrower question.')
                 if settings['streaming'] and time.monotonic()-last>1.5:
                     last=time.monotonic()
-                    try:
-                        if settings['math']=='rich':
-                            preview=next(iter(rich_pages(response)), '⚡ Working…')
-                            await edit_rich(context.bot,inline_message_id=inline_id,text=preview)
-                        else:await status(readable_math(response[-1700:]))
-                    except TelegramError:pass
+                    await preview_worker.update(response)
         try:
-            await asyncio.wait_for(consume(),config.REQUEST_TIMEOUT)
+            await asyncio.wait_for(consume(),config.AGENT_TIMEOUT if use_agent else config.REQUEST_TIMEOUT)
             if not response.strip():raise ProviderError('No answer returned. Please retry.')
             output=code_downloads.format_answer(context,item['owner'],response) if settings['math']=='rich' else response
             item['pages']=([{'markdown':p} for p in rich_pages(output)] if settings['math']=='rich'
                            else list(formatted_chunks(readable_math(output))))
+            recovery=context.application.bot_data.get('agent_store')
+            if recovery:recovery.save_answer(item['owner'],'external-last',response)
+            runtime=agent_state.get('runtime')
+            if runtime and runtime.images:
+                try:
+                    ids=await cache_images(context,item['owner'],runtime.images)
+                    item['pages'].append(image_rich(ids))
+                except ProviderError:
+                    urls=[getattr(img,'url','') for img in runtime.images]
+                    if not all(urls):raise
+                    item['pages'] += [{'photo_file_id':url} for url in urls]
         except ImageRequested as request:
             await status('🎨 Creating your image…')
             images=await generate_images(context,item['owner'],user,request.prompt,original_prompt=item['query'])
@@ -139,22 +155,27 @@ async def generate_inline(context,inline_id,token,item,user):
                 if not all(urls):raise
                 # Inline rich edits need file IDs; ordinary inline media accepts URLs.
                 item['pages']=[{'photo_file_id':url} for url in urls]
+        await preview_worker.close()
         await show_page(context.bot,inline_id,token,item,0)
         normalize_user(user)
-        if not item.get('document'):charge_request(user)
+        if not item.get('document') and not item.get('charged'):charge_request(user)
+        item['charged']=True
     except asyncio.CancelledError:
-        await status('Stopped.' if item.get('document') else 'Stopped. No quota used.')
+        await status('Agent stopped. Completed actions may remain; check /agentstatus and /reminders in the bot.' if use_agent else ('Stopped.' if item.get('document') else 'Stopped. No quota used.'))
         raise
     except (ProviderError,asyncio.TimeoutError) as error:
+        await preview_worker.close()
         item['pages']=None
         text=str(error) if isinstance(error,ProviderError) else 'Request timed out. Please retry.'
         await context.bot.edit_message_text(inline_message_id=inline_id,text=text,reply_markup=keyboard(token))
     except TelegramError as error:
-        import logging
-        logging.getLogger(__name__).warning('Guest/inline final delivery failed (%s)',type(error).__name__)
-        item['pages']=None
-        await status('Telegram could not display the answer. Please retry.' if item.get('document') else 'Telegram could not display the answer. Please try again; no quota was used.')
+        log_error('Guest/inline final delivery failed',error)
+        # Keep pages and generated media. Generate retries delivery, not the AI task.
+        try:await context.bot.edit_message_text(inline_message_id=inline_id,
+            text='Telegram delivery was interrupted. Tap Generate to resend the saved result. For text, you can also use /last external in the bot DM.',reply_markup=keyboard(token))
+        except TelegramError:pass
     finally:
+        await preview_worker.close()
         item['running']=False
 
 
@@ -166,8 +187,6 @@ async def start_inline(context,inline_id,token,owner):
     async def status(text):
         await context.bot.edit_message_text(inline_message_id=inline_id,text=text,reply_markup=keyboard(token))
     if not enabled(context,mode):return await status('This access mode is disabled. Open the bot to ask privately.')
-    if item['pages']:
-        await show_page(context.bot,inline_id,token,item,0);return
     if item['running']:return
     async def work():
         try:
@@ -175,6 +194,12 @@ async def start_inline(context,inline_id,token,owner):
             user=user_data_cache.get(str(owner))
             if not user:return await status('Open @'+context.bot.username+' and send /start first. Then tap Generate.')
             normalize_user(user)
+            if item['pages']:
+                await show_page(context.bot,inline_id,token,item,0)
+                if not item.get('charged'):
+                    if not item.get('document'):charge_request(user)
+                    item['charged']=True
+                return
             if user.get('subscription')!='active':
                 if not item.get('document') and user.get('request_count',0)>=config.FREE_DAILY_QUOTA:return await status('Daily quota reached. Check /balance in the bot.')
                 if not await main.check_channel_membership(owner,context.bot):

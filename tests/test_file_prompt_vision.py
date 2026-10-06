@@ -12,7 +12,7 @@ import httpx
 from PIL import Image
 from telegram import Document
 from telegram.error import BadRequest, NetworkError
-import main, config, group_agent, code_downloads, ocr
+import main, config, code_downloads, ocr
 from chat_store import ChatStore
 from documents import read_text_document, prepare_document
 from image_generation import GeneratedImage, deliver_images, image_intent
@@ -96,42 +96,9 @@ class FileTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PromptTests(unittest.IsolatedAsyncioTestCase):
-    async def test_owner_upload_any_name_applies_globally_clear_and_settings_toggle(self):
-        u,c=fixture(False);c.args=[]
-        u.message.caption=None
-        c.bot.get_file=AsyncMock(return_value=downloadable(b'CUSTOM: Be a physics tutor.'))
-        with tempfile.TemporaryDirectory() as d,patch.object(config,'DATA_DIR',Path(d)),patch.object(main,'ADMIN_ID','123'):
-            await group_agent.agents_command(u,c)
-            self.assertTrue(group_agent.awaiting(c,u))
-            # Extension and even image MIME do not restrict a pending prompt upload.
-            u.message.document=Document('x','u',file_name='instructions.anything',mime_type='image/png')
-            await group_agent.uploaded_document(u,c)
-            self.assertEqual(group_agent.instructions(c,-999),'CUSTOM: Be a physics tutor.')
-            restarted=NS(bot_data={});group_agent.initialize(restarted)
-            self.assertEqual(restarted.bot_data['external_system_prompt'],'CUSTOM: Be a physics tutor.')
-            self.assertFalse(group_agent.awaiting(c,u))
-            u.callback_query=NS(data='admin:agent:toggle',answer=AsyncMock(),edit_message_text=AsyncMock())
-            await main.admin_callback(u,c)
-            self.assertEqual(group_agent.instructions(c),'')
-            await main.admin_callback(u,c)
-            self.assertIn('CUSTOM',group_agent.instructions(c))
-            c.args=['clear'];await group_agent.agents_command(u,c)
-            group_agent.initialize(restarted)
-            self.assertEqual(restarted.bot_data['external_system_prompt'],'')
 
-    async def test_non_owner_cannot_replace_prompt_or_consume_pending_upload(self):
-        u,c=fixture(False);c.args=[];u.message.caption='/agents'
-        u.message.document=Document('x','u',file_name='instructions.txt')
-        c.bot.get_file=AsyncMock()
-        c.application.bot_data['external_system_prompt']='Original'
-        c.application.bot_data['pending_system_prompt']={'chat_id':123,'until':time.monotonic()+600}
-        with patch.object(main,'ADMIN_ID','999'):
-            await group_agent.uploaded_document(u,c)
-            await group_agent.agents_command(u,c)
-        c.bot.get_file.assert_not_awaited()
-        self.assertEqual(c.application.bot_data['external_system_prompt'],'Original')
 
-    async def test_custom_system_replaces_default_for_groups_and_all_guests_only(self):
+    async def test_legacy_custom_system_prompt_is_ignored_in_all_modes(self):
         seen=[]
         async def stream(messages,**kwargs):seen.append(messages[0]['content']);yield 'Answer'
         for group in (False,True):
@@ -142,8 +109,8 @@ class PromptTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     with patch.object(main,'charge_request'):
                         await main.generate_answer(u,c,{},'hi')
-                    self.assertEqual('UNIQUE_CUSTOM_SYSTEM' in seen[-1],group)
-                    self.assertEqual(config.SYSTEM_PROMPT in seen[-1],not group)
+                    self.assertNotIn('UNIQUE_CUSTOM_SYSTEM',seen[-1])
+                    self.assertIn(config.SYSTEM_PROMPT,seen[-1])
                 finally:store.close()
         for mode in ('guest','inline'):
             _,c=fixture(False)
@@ -151,8 +118,8 @@ class PromptTests(unittest.IsolatedAsyncioTestCase):
             item={'query':'Hi','owner':123,'mode':mode,'pages':None,'running':True}
             with patch('inline_mode.charge_request'):
                 await generate_inline(c,'id','token',item,{})
-            self.assertEqual('UNIQUE_CUSTOM_SYSTEM' in seen[-1],mode=='guest')
-            self.assertEqual(config.SYSTEM_PROMPT in seen[-1],mode!='guest')
+            self.assertNotIn('UNIQUE_CUSTOM_SYSTEM',seen[-1])
+            self.assertIn(config.SYSTEM_PROMPT,seen[-1])
 
 
 class WholeCodeTests(unittest.IsolatedAsyncioTestCase):

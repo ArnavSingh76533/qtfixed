@@ -66,7 +66,7 @@ class AdminQueueTests(unittest.IsolatedAsyncioTestCase):
             u.callback_query=NS(data='admin:mode:guest',answer=AsyncMock())
             await main.admin_callback(u,c)
         self.assertEqual(get_settings(c)['mode'],'inline')
-        u.message.reply_text.assert_not_awaited()
+        self.assertIn('premium',u.message.reply_text.call_args.args[0])
         self.assertTrue(u.callback_query.answer.call_args.kwargs['show_alert'])
 
     async def test_modes_are_global_persisted_and_exclusive(self):
