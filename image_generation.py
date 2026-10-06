@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 import httpx
 from PIL import Image
 from telegram import InputMediaPhoto
-from telegram.error import TelegramError
+from telegram.error import TelegramError, BadRequest
 import config
 from provider import ProviderError
 
@@ -15,13 +15,19 @@ logger=logging.getLogger(__name__)
 SIZES={'-p1':('portrait_4_3',768,1024),'-p2':('portrait_16_9',576,1024),
        '-l1':('landscape_4_3',1024,768),'-l2':('landscape_16_9',1024,576),
        '-s1':('square',1024,1024),'-s2':('square_hd',1024,1024),'-hd':('square_hd',1024,1024)}
-IMAGE_INTENT=re.compile(r'^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:generate|create|draw|make|design|paint|imagine)\b.{0,90}\b(?:image|picture|photo|artwork|illustration|poster|wallpaper|logo|portrait)\b|^\s*(?:draw|paint|imagine)\s+|\b(?:image|photo|picture)\s+(?:banao|bana do|banado)\b',re.I|re.S)
+IMAGE_INTENT=re.compile(r'^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:generate|create|draw|make|design|paint|imagine|send|show|give)\b.{0,90}\b(?:image|picture|photo|artwork|illustration|poster|wallpaper|logo|portrait)\b|^\s*(?:draw|paint|imagine)\s+|\b(?:image|photo|picture)\s+(?:banao|bana do|banado)\b',re.I|re.S)
+
+class GeneratedImage(bytes):
+    def __new__(cls, data, url):
+        result=super().__new__(cls,data);result.url=url;return result
+
 
 class ImageRequested(Exception):
     def __init__(self,prompt):self.prompt=prompt
 
 def available():return bool(config.FAL_API_KEY or config.GETIMG_API_KEY)
 def image_intent(prompt):
+    if re.search(r'\b(find|search|existing|actual|real photograph|original photo)\b',prompt,re.I):return False
     noun=re.search(r'\b(image|picture|photo|artwork|illustration|poster|wallpaper|logo|portrait)\b',prompt,re.I)
     if noun and re.search(r'\b(code|script|function|program|api)\b',prompt[:noun.start()],re.I):return False
     return bool(IMAGE_INTENT.search(prompt))
@@ -58,7 +64,7 @@ class ImageClient:
                 if im.width*im.height>25_000_000:raise ValueError('oversized image')
                 im.verify()
         await asyncio.to_thread(verify)
-        return bytes(data)
+        return GeneratedImage(bytes(data),url)
 
     async def fal(self,prompt,size,count):
         if not config.FAL_API_KEY:raise ProviderError('Primary image provider is not configured.')
@@ -120,11 +126,19 @@ async def generate_images(context,owner,user,prompt,original_prompt=None):
 async def deliver_images(message,images,prompt,context=None,owner=None):
     if context is not None:
         from rich_messages import api
-        ids=await cache_images(context,owner,images)
-        await api(context.bot,'sendRichMessage',chat_id=message.chat_id,
-            message_thread_id=message.message_thread_id,rich_message=image_rich(ids,prompt),
-            reply_parameters={'message_id':message.message_id,'allow_sending_without_reply':True})
-        return
+        try:ids=await cache_images(context,owner,images)
+        except ProviderError:
+            ids=[getattr(img,'url','') for img in images]
+        try:
+            if not all(ids):raise BadRequest('No cached rich media')
+            await api(context.bot,'sendRichMessage',chat_id=message.chat_id,
+                message_thread_id=message.message_thread_id,rich_message=image_rich(ids,prompt),
+                reply_parameters={'message_id':message.message_id,'allow_sending_without_reply':True})
+            return
+        except BadRequest:
+            # Definitive rejection: use a normal photo/album in the same chat.
+            # Do not retry network timeouts here: the rich message may have arrived.
+            logger.warning('Rich image rejected; sending native photo in the same chat')
     # Retained for callers that only provide a Message (never sends to another chat).
     caption='🎨 '+prompt[:850]
     if len(images)==1:
@@ -141,13 +155,16 @@ async def cache_images(context,owner,images):
         raise ProviderError('Image delivery needs an upload chat. Ask the admin to set IMAGE_CACHE_CHAT_ID to a private channel where the bot can post.')
     ids=[]
     for data in images:
-        sent=await context.bot.send_photo(chat_id=target,photo=BytesIO(data),disable_notification=True)
+        try:
+            sent=await context.bot.send_photo(chat_id=target,photo=BytesIO(data),disable_notification=True)
+        except TelegramError as error:
+            logger.warning('Image upload chat rejected sendPhoto (%s)',type(error).__name__)
+            raise ProviderError('The image upload chat is unavailable. Ask the admin to set IMAGE_CACHE_CHAT_ID or fix the bot permissions in the log chat.') from None
         ids.append(sent.photo[-1].file_id)
         try:await context.bot.delete_message(chat_id=target,message_id=sent.message_id)
         except TelegramError:logger.warning('Could not delete image staging message')
     return ids
 
-def image_rich(file_ids,prompt):
-    media=[{'id':f'image_{i}','media':{'type':'photo','media':fid}} for i,fid in enumerate(file_ids)]
-    markdown='\n\n'.join(f'![](tg://photo?id=image_{i})' for i in range(len(file_ids)))
-    return {'markdown':markdown,'media':media}
+def image_rich(file_ids,prompt=''):
+    # Structured blocks avoid tg:// markdown URI parsing differences.
+    return {'blocks':[{'type':'photo','photo':{'type':'photo','media':fid}} for fid in file_ids]}

@@ -102,12 +102,12 @@ class FileAgentTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(main,'ADMIN_ID','123'):
                 await group_agent.agent_command(u,c)
                 restarted=NS(bot_data={});group_agent.initialize(restarted)
-                self.assertEqual(restarted.bot_data['group_agents']['-100123'],'Answer as a chemistry tutor.')
-                self.assertEqual(group_agent.instructions(c,-1),'')
+                self.assertEqual(restarted.bot_data['external_system_prompt'],'Answer as a chemistry tutor.')
+                self.assertEqual(group_agent.instructions(c,-1),'Answer as a chemistry tutor.')
                 c.application.bot_data['global_settings']={'group_agent':False}
                 self.assertEqual(group_agent.instructions(c,-100123),'')
                 c.args=['clear'];await group_agent.agent_command(u,c)
-                self.assertEqual(c.application.bot_data['group_agents'],{})
+                self.assertEqual(c.application.bot_data['external_system_prompt'],'')
 
     async def test_text_handler_and_ask_reply(self):
         u,c=fixture(False);u.message.caption='summarize';u.message.document=Document('f','u',file_name='a.txt')
@@ -156,18 +156,23 @@ class GuestMediaCodeTests(unittest.IsolatedAsyncioTestCase):
         with patch('inline_mode.generate_images',AsyncMock(return_value=[b'img'])),patch('inline_mode.cache_images',AsyncMock(return_value=['photo-id'])),patch('inline_mode.charge_request') as charge:
             await generate_inline(c,'guest-id','token',item,{'subscription':'inactive','dm_started':False})
             payload=c.bot._post.call_args.kwargs['data'];self.assertEqual(payload['inline_message_id'],'guest-id')
-            self.assertEqual(payload['rich_message']['media'][0]['media']['media'],'photo-id');charge.assert_called_once()
+            self.assertEqual(payload['rich_message']['blocks'][0]['photo']['media'],'photo-id');charge.assert_called_once()
             charge.reset_mock();c.bot._post.side_effect=BadRequest('cannot edit')
+            c.bot.edit_message_media=AsyncMock(side_effect=BadRequest('cannot send photo either'))
             await generate_inline(c,'guest-id','token',item,{'subscription':'inactive','dm_started':False})
             charge.assert_not_called()
 
-    def test_code_copy_preserves_literal_text_and_splits_long_snippets(self):
+    def test_code_copy_preserves_literal_text_in_one_complete_download(self):
         code='print("<tag> & `x` $x \\[x\\]")\n'+('hello😀'*100)
-        result=normalize_math(with_code_copy('```python\n'+code+'\n```'))
+        saved=[]
+        def download(number,content,lang):
+            saved.append((number,content,lang));return 'https://t.me/queryaibot?start=code_test'
+        result=normalize_math(with_code_copy('```python\n'+code+'\n```',download))
         attrs=re.findall(r'<tg-button type="copy_text" text="([^"]*)"',result)
-        self.assertGreater(len(attrs),1)
-        self.assertEqual(''.join(html.unescape(a) for a in attrs),code)
-        self.assertTrue(all(len(html.unescape(a).encode('utf-16-le'))//2<=256 for a in attrs))
+        self.assertEqual(attrs,[])
+        self.assertEqual(saved,[(1,code+'\n','python')])
+        self.assertEqual(result.count('Download complete code'),1)
+        self.assertIn(code,result)
         self.assertNotIn('Copy answer',result)
 
 class BroadcastTests(unittest.IsolatedAsyncioTestCase):
@@ -200,7 +205,7 @@ class BroadcastTests(unittest.IsolatedAsyncioTestCase):
 
 
 class IntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_txt_contents_enter_model_and_success_is_charged(self):
+    async def test_txt_contents_enter_model_without_quota_charge(self):
         from chat_store import ChatStore
         u,c=fixture(False);calls=[]
         u.message.get_bot=lambda:c.bot
@@ -212,7 +217,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(main,'read_text_document',AsyncMock(return_value='Unique attachment text')),patch.object(main,'charge_request') as charge:
                     await main.generate_answer(u,c,{'subscription':'inactive'},'summarize',document={'file_id':'file'})
                 self.assertIn('Unique attachment text',calls[0][-1]['content'])
-                self.assertIn('summarize',calls[0][-1]['content']);charge.assert_called_once()
+                self.assertIn('summarize',calls[0][-1]['content']);charge.assert_not_called()
             finally:store.close()
 
     async def test_native_album_optional_button_failure_does_not_replay_delivery(self):

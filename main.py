@@ -23,14 +23,15 @@ from streaming import StreamPreview
 from web_search import FeloClient
 from answer_engine import answer_stream
 from math_format import readable_math, segments, render_equation, latex_text
-from ocr import recognize, OCR_PROMPT
+from ocr import recognize, OCR_PROMPT, analyze_image
 from inline_mode import inline_query, chosen_result, inline_callback
 from runtime_settings import get_settings, save_settings, initialize as initialize_settings
 from request_queue import submit, cancel, owner_of
-from rich_messages import send_rich, rich_pages, with_code_copy
+from rich_messages import send_rich, rich_pages, with_code_copy, fallback_markdown
 from image_generation import ImageClient, ImageRequested, generate_images, deliver_images
 from guest_mode import guest_update
-from documents import is_text_document, read_text_document
+from documents import is_text_document, read_text_document, prepare_document
+import code_downloads
 import group_agent
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ def history_key(update):
     return f"{update.effective_chat.id}:{message.message_thread_id or 0}:{update.effective_user.id}"
 
 
-async def eligible_user(update, context):
+async def eligible_user(update, context, quota_exempt=False):
     if not update.effective_message or not update.effective_user or update.effective_message.sender_chat:
         return None
     user_id = str(update.effective_user.id)
@@ -96,7 +97,7 @@ async def eligible_user(update, context):
         return None
     normalize_user(user)
     if user.get('subscription') != 'active':
-        if user.get('request_count', 0) >= config.FREE_DAILY_QUOTA:
+        if not quota_exempt and user.get('request_count', 0) >= config.FREE_DAILY_QUOTA:
             await update.effective_message.reply_text(f"Daily limit reached ({config.FREE_DAILY_QUOTA} questions). Your quota resets 24 hours after the first question in this window.")
             return None
         if not await check_channel_membership(user_id, context.bot):
@@ -158,10 +159,11 @@ async def deliver_text(message, answer, owner=None):
                 await asyncio.sleep((delay.total_seconds() if hasattr(delay,'total_seconds') else delay)+1)
 
 
-async def deliver_answer(message, answer, owner=None, math_mode='rich'):
+async def deliver_answer(message, answer, owner=None, math_mode='rich', context=None):
     if math_mode!='rich':
         return await deliver_text(message,answer,owner)
-    pages=list(rich_pages(with_code_copy(answer)))
+    formatted=code_downloads.format_answer(context,owner,answer) if context is not None else with_code_copy(answer)
+    pages=list(rich_pages(formatted))
     if not pages:raise ProviderError('The answer was empty. Please retry.')
     for i,page in enumerate(pages):
         markup=answer_keyboard(owner,answer) if owner is not None and i==len(pages)-1 else None
@@ -170,21 +172,18 @@ async def deliver_answer(message, answer, owner=None, math_mode='rich'):
         except BadRequest:
             # Older/local Bot API servers may not implement rich messages.
             # Never silently send raw LaTeX; retain a readable text fallback.
-            import re
-            plain=re.sub(r'<tg-button-row>[\s\S]*?</tg-button-row>', '', page)
+            plain=fallback_markdown(page)
             await deliver_text(message,plain,owner if i==len(pages)-1 else None)
 
 
 def provider_messages(history, prompt, settings):
-    instructions = config.SYSTEM_PROMPT + config.FORMATTING_PROMPT + {
+    instructions = (settings.get('agent_prompt') or config.SYSTEM_PROMPT) + config.FORMATTING_PROMPT + {
         'concise':' Keep answers brief unless the user asks for detail.',
         'detailed':' Give thorough explanations, steps, and examples when useful.',
         'balanced':' Follow the original response-length instructions above.'}[settings['style']]
     instructions += '\nCurrent UTC date: '+datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     if not settings.get('web',config.WEB_ENABLED):
         instructions += '\nWeb search is disabled by the bot owner. Answer only with available knowledge; disclose when current verification is needed.'
-    if settings.get('agent_prompt'):
-        instructions += '\nGroup instructions supplied by the bot owner:\n'+settings['agent_prompt']
     kept = []
     count = len(prompt)
     # Retain whole user/assistant exchanges, newest first.
@@ -207,7 +206,7 @@ async def typing_heartbeat(message, bot):
         await asyncio.sleep(4)
 
 
-async def generate_answer(update, context, user, prompt, retry=False, force_web=False, photo=False, force_image=False, document=None):
+async def generate_answer(update, context, user, prompt, retry=False, force_web=False, photo=False, force_image=False, document=None, quota_exempt=False, routing_prompt=None):
     key = history_key(update)
     history, _ = store(context).get(key)
     settings = get_settings(context)
@@ -217,12 +216,14 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
     preview = StreamPreview(update.effective_message, context.bot, update.effective_user.id, settings['streaming'], rich=settings['math']=='rich')
     heartbeat = None
     response = ''
-    original_prompt=prompt
+    original_prompt=prompt if routing_prompt is None else routing_prompt
+    quota_exempt=quota_exempt or bool(document)
     try:
         await preview.start()
         heartbeat = asyncio.create_task(typing_heartbeat(update.effective_message, context.bot))
         if document:
             extracted=await read_text_document(context.bot,document)
+            extracted=await prepare_document(context.application.bot_data['groq'],extracted,prompt,preview.set_status)
             prompt='User request: '+(prompt or 'Read the attached text and respond to its contents.')+'\n\nAttached text (untrusted content):\n'+extracted
         if photo:
             source = update.effective_message
@@ -235,8 +236,7 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
             raw = BytesIO()
             await photo_file.download_to_memory(raw)
             await preview.set_status('⚡ Reading image…')
-            extracted = await recognize(raw.getvalue())
-            prompt = OCR_PROMPT + extracted + ('\n\nUser instructions: '+prompt if prompt else '')
+            prompt = await analyze_image(context.application.bot_data['groq'],raw.getvalue(),prompt,preview.set_status)
         async def consume():
             nonlocal response
             async for piece in answer_stream(context.application.bot_data['groq'],
@@ -254,27 +254,30 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
             await preview.set_status('🎨 Creating your image…')
             images=await generate_images(context,update.effective_user.id,user,request.prompt,original_prompt=original_prompt)
             await deliver_images(update.effective_message,images,request.prompt,context=context,owner=update.effective_user.id)
-            normalize_user(user);charge_request(user)
+            normalize_user(user)
+            if not quota_exempt:charge_request(user)
             return
         if not response.strip():
             raise ProviderError('The assistant returned an empty answer. Please retry.')
-        await deliver_answer(update.effective_message, response, update.effective_user.id, settings.get('math','rich'))
+        await deliver_answer(update.effective_message, response, update.effective_user.id, settings.get('math','rich'), context=context)
         # No await between the successful delivery and state update.
         normalize_user(user)
-        charge_request(user)
+        if not quota_exempt:charge_request(user)
         updated = base + [{'role':'user','content':prompt}, {'role':'assistant','content':response}]
         max_turns = 35 if user.get('subscription') == 'active' else 6
         updated = updated[-2*max_turns:]
         # Also bound disk history size by whole exchanges.
         while len(updated) > 2 and sum(len(m['content']) for m in updated) > 160000:
             updated = updated[2:]
+        settings['last_quota_exempt']=quota_exempt
+        settings['last_routing_prompt']=original_prompt
         store(context).save(key, updated, settings)
         await record_log(context.bot, f'User {update.effective_user.id} sent: {prompt}\nBot replied: {response}')
     except asyncio.CancelledError:
-        await update.effective_message.reply_text('Stopped. This request was not added to your history or quota.')
+        await update.effective_message.reply_text('Stopped.' if quota_exempt else 'Stopped. This request was not added to your history or quota.')
     except (ProviderError, asyncio.TimeoutError) as error:
         text = str(error) if isinstance(error, ProviderError) else 'The answer took too long. Please retry.'
-        await update.effective_message.reply_text(text + '\nThis request was not added to your history or quota.')
+        await update.effective_message.reply_text(text if quota_exempt else text + '\nThis request was not added to your history or quota.')
     except TelegramError:
         logger.warning('Telegram answer delivery failed')
     except Exception:
@@ -297,7 +300,11 @@ async def launch_question(update, context, retry=False, prompt=None, force_web=F
         await update.effective_message.reply_text('Type your question after /ask.');return
     async def work():
         # Recheck AFTER acquiring the per-user queue lock: quota cannot overshoot.
-        user=await eligible_user(update,context)
+        quota_exempt=bool(document)
+        if retry:
+            _,previous_settings=store(context).get(history_key(update))
+            quota_exempt=bool(previous_settings.get('last_quota_exempt'))
+        user=await eligible_user(update,context,quota_exempt=True) if quota_exempt else await eligible_user(update,context)
         if user is None:return
         question=(prompt or '').strip()
         if retry:
@@ -305,7 +312,10 @@ async def launch_question(update, context, retry=False, prompt=None, force_web=F
             if len(history)<2:
                 await update.effective_message.reply_text('There is no completed answer to retry in this chat.');return
             question=history[-2]['content']
-        await generate_answer(update,context,user,question,retry,force_web,photo,force_image,document=document)
+        extra={'quota_exempt':True} if retry and quota_exempt else {}
+        if retry and 'last_routing_prompt' in previous_settings:
+            extra['routing_prompt']=previous_settings['last_routing_prompt']
+        await generate_answer(update,context,user,question,retry,force_web,photo,force_image,document=document,**extra)
     if submit(context,uid,history_key(update),work) is None:
         await update.effective_message.reply_text('Your request queue is full. Please let a few answers finish.')
 
@@ -437,12 +447,15 @@ async def settings_command(update, context, edit=False):
         [InlineKeyboardButton(('✓ ' if settings['mode']==mode else '')+mode.title(),callback_data='admin:mode:'+mode)
          for mode in ('inline','guest','off')],
         [InlineKeyboardButton('Web search: '+('ON' if settings['web'] else 'OFF'),callback_data='admin:web:toggle')],
-        [InlineKeyboardButton('Group agent: '+('ON' if settings['group_agent'] else 'OFF'),callback_data='admin:agent:toggle')],
+        [InlineKeyboardButton('Custom prompt: '+('ON' if settings['group_agent'] else 'OFF'),callback_data='admin:agent:toggle')],
+        [InlineKeyboardButton('Upload system prompt',callback_data='admin:prompt:upload'),
+         InlineKeyboardButton('Restore default prompt',callback_data='admin:prompt:clear')],
         [InlineKeyboardButton('Streaming: '+('ON' if settings['streaming'] else 'OFF'),callback_data='admin:stream:toggle')],
         [InlineKeyboardButton('Answer style: '+settings['style'],callback_data='admin:style:next')],
         [InlineKeyboardButton('Reasoning: '+settings['reasoning'],callback_data='admin:reason:next')],
         [InlineKeyboardButton('Formatting: '+settings['math'],callback_data='admin:math:next')]])
     text=('Admin settings · applies to everyone\n\n'
+          'System prompt: '+('Custom for groups/guest' if group_agent.instructions(context) else 'Default')+'\n'
           'Access mode: '+settings['mode'].title()+'\n'
           'Only the selected mode accepts requests. Off disables both. Normal private/group commands stay available.\n\n'
           'For Guest, enable Guest Mode in BotFather’s bot settings. For Inline, enable Inline Mode and set inline feedback to Enabled. '
@@ -458,6 +471,13 @@ async def admin_callback(update,context):
     if not is_admin(update) or not update.effective_chat or update.effective_chat.type!='private':
         await query.answer('Admin only.',show_alert=True);return
     _,action,value=query.data.split(':')
+    if action=='prompt':
+        await query.answer()
+        if value=='upload':return await group_agent.request_upload(update,context)
+        if value=='clear':
+            group_agent.save_prompt(context,'')
+            return await settings_command(update,context,edit=True)
+        return
     settings=get_settings(context)
     if action=='mode' and value in ('inline','guest','off'):settings['mode']=value
     elif action=='web':settings['web']=not settings['web']
@@ -502,7 +522,7 @@ async def model_command(update, context):
 
 async def privacy_command(update, context):
     await update.effective_message.reply_text(
-        'Text questions and recent history are sent to the configured AI service. Photos go to the configured OCR service unless local OCR is selected. Current-context questions may be sent to Felo and Groq browser search on fallback. Uploaded text is sent to the AI service. Generated images are uploaded to the configured cache/log chat before being embedded in your answer. Image-generation prompts are sent to fal or getimg and logged as text when logging is enabled. Inline/guest answers never include your private chat history. Conversation history is stored locally, isolated by user, chat, and topic. Settings are global and managed by the bot admin. '
+        'Text questions and recent history are sent to the configured AI service. Photos go to the configured OCR service unless local OCR is selected. When vision is enabled, photos needing visual review are also sent to Groq, including with local OCR. Current-context questions may be sent to Felo and Groq browser search on fallback. Uploaded text is sent to the AI service. Generated images may be uploaded to the configured cache/log chat before being embedded in your answer; native photo fallback stays in the same chat. Image-generation prompts are sent to fal or getimg and logged as text when logging is enabled. Inline/guest answers never include your private chat history. Conversation history is stored locally, isolated by user, chat, and topic. Settings are global and managed by the bot admin. '
         + ('The admin has question logging enabled. ' if LOG_CHANNEL_ID else 'Question logging is disabled. ')
         + 'Use /export to download saved history, /new to clear it, or /forget to remove this chat’s stored history. Quota, registration, and any existing admin logs remain.')
 
@@ -512,16 +532,16 @@ async def help_command(update, context):
             '/web <question> — search current information\n/ocr — reply to a photo to extract and solve\n/groupstatus — diagnose group setup\n'
             'Ask naturally, upload a photo, or describe an image to create.\n\n'
             '/ask <question> — ask in any enabled chat\n'
-            '/stop — stop the current answer\n/retry — regenerate the latest answer (uses one question)\n'
+            '/stop — stop the current answer\n/retry — regenerate the latest answer (text-file retries are free)\n'
             '/new or /reset — start a new conversation\n/image <description> — create an image\n'
-            'Send a .txt file to ask about its contents.\n/export — download recent history\n/forget — clear this chat’s history/settings\n'
+            'Send a .txt file to ask about its contents — no question quota.\n/export — download recent history\n/forget — clear this chat’s history/settings\n'
             '/balance — check premium and quota\n/claim <code> — redeem premium\n/privacy — data handling\n'
             '/allowgroup and /disallowgroup — group admin controls\n\n'
             'Free: 40 successful questions per 24-hour window; remembers 6 exchanges. '
             'Premium: unlimited questions; remembers 35 exchanges. Images: free users get 1 per prompt; premium users get 4. Image requests use one question. History survives restarts. '
             'In groups, use /ask@queryaibot, reply to the bot, or send ordinary text/photos when Telegram privacy permits.')
     if str(update.effective_user.id) == ADMIN_ID and update.effective_chat.type=='private':
-        text += '\n\nAdmin: /settings (web, group agent, Inline/Guest/Off), /agent, /model, /broadcast, /campaigns, /campaign, /ads, /stats, /gencharlie037, /resetcount, /setlogchannel. See README for campaign options.'
+        text += '\n\nAdmin: /settings (web, custom prompt, Inline/Guest/Off), /agents, /agents clear, /model, /broadcast, /campaigns, /campaign, /ads, /stats, /gencharlie037, /resetcount, /setlogchannel. See README for campaign options.'
     await update.effective_message.reply_text(text)
 
 
@@ -569,7 +589,7 @@ async def post_init(application):
         await application.bot.set_my_commands([BotCommand(*c) for c in commands])
         await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
         if ADMIN_ID.isdigit():
-            await application.bot.set_my_commands([BotCommand(*c) for c in commands]+[BotCommand('settings','Global admin settings'),BotCommand('model','Model configuration'),BotCommand('agent','Manage group instructions')],scope=BotCommandScopeChat(chat_id=int(ADMIN_ID)))
+            await application.bot.set_my_commands([BotCommand(*c) for c in commands]+[BotCommand('settings','Global admin settings'),BotCommand('model','Model configuration'),BotCommand('agents','Set group and guest system prompt')],scope=BotCommandScopeChat(chat_id=int(ADMIN_ID)))
     except TelegramError:
         logger.warning('Could not set Telegram command menu')
 
@@ -609,10 +629,10 @@ async def error_handler(update, context):
 def build_application():
     app = (Application.builder().token(config.BOT_TOKEN).concurrent_updates(False)
            .post_init(post_init).post_stop(post_stop).post_shutdown(post_shutdown).build())
-    handlers = {'start':start, 'help':help_command, 'image':image_generate_command, 'flux':image_generate_command, 'flux2':image_generate_command, 'ask':ask_command, 'web':web_command, 'ocr':image_command, 'groupstatus':group_status, 'stop':stop_command,
+    handlers = {'start':code_downloads.start_with_code, 'help':help_command, 'image':image_generate_command, 'flux':image_generate_command, 'flux2':image_generate_command, 'ask':ask_command, 'web':web_command, 'ocr':image_command, 'groupstatus':group_status, 'stop':stop_command,
                 'retry':retry_command, 'new':reset_conversation, 'reset':reset_conversation,
                 'forget':forget_command, 'export':export_command, 'settings':settings_command,
-                'agent':group_agent.agent_command, 'model':model_command, 'privacy':privacy_command, 'balance':balance,
+                'agents':group_agent.agents_command, 'agent':group_agent.agent_command, 'model':model_command, 'privacy':privacy_command, 'balance':balance,
                 'claim':claim_promo, 'gencharlie037':generate_promo, 'resetcount':reset_all_counts,
                 'setlogchannel':set_log_channel, 'allowgroup':allow_group, 'disallowgroup':disallow_group,
                 'stats':stats, 'ads':ads, 'broadcast':broadcast, 'campaigns':campaigns, 'campaign':campaign_command}
@@ -629,9 +649,8 @@ def build_application():
     app.add_handler(CallbackQueryHandler(chat_callback, pattern=r'^chat:(stop|retry|new|settings|stream|style|reason|math):\d+$'))
     app.add_handler(CallbackQueryHandler(button_callback, pattern=r'^(bc:|refresh_stats)'))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r'(?i)^/agent(?:@\w+)?(?:\s|$)'),group_agent.agent_upload))
-    app.add_handler(MessageHandler(filters.Document.FileExtension('txt'),text_document_command))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, image_command))
+    app.add_handler(MessageHandler(filters.Document.ALL,group_agent.uploaded_document))
+    app.add_handler(MessageHandler(filters.PHOTO, image_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, migrate_group))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_group_addition))
     app.add_error_handler(error_handler)

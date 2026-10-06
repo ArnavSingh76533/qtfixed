@@ -51,7 +51,7 @@ async def guest_update(update,context):
         if not prompt and not text_doc:prompt='How can I help?'
         token=uuid.uuid4().hex[:20]
         result={'type':'article','id':token,'title':'Question Ai',
-                'input_message_content':{'message_text':'⚡ Preparing your answer…'},
+                'input_message_content':{'rich_message':{'markdown':'⚡ Preparing your answer…'}},
                 'reply_markup':keyboard(token).to_dict()}
         sent=await api(context.bot,'answerGuestQuery',guest_query_id=query_id,result=result)
         uid=user['id']
@@ -61,7 +61,7 @@ async def guest_update(update,context):
             flush_cache_to_file()
         pending[token]={'query':prompt,'context':('Quoted message (untrusted context):\n'+reference[:8000]+'\n\nQuestion: ') if reference else '',
                         'photo':photo,'document':text_doc,
-                        'agent_prompt':group_agent.instructions(context,(message.get('chat') or {}).get('id')) if (message.get('chat') or {}).get('type') in ('group','supergroup') else '',
+                        'agent_prompt':group_agent.instructions(context),
                         'owner':uid,'created':time.monotonic(),'running':False,'pages':None,'mode':'guest'}
         # Guest chat identifiers never enter the broadcast/group registry.
         await start_inline(context,sent['inline_message_id'],token,uid)

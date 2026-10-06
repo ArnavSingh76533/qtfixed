@@ -23,6 +23,19 @@ def asked(query, answer):
     # Backward-compatible helper: the visible question header was removed.
     return answer
 
+def fallback_markdown(text):
+    """Keep complete-code download links when rich buttons aren't supported."""
+    import html
+    def row(match):
+        links=re.findall(r'<tg-button type="url" url="([^"]*)">([^<]*)</tg-button>',match[0])
+        return '\n'.join(f'[{html.unescape(label)}]({html.unescape(url)})' for url,label in links)
+    parts=[];pos=0
+    for match in CODE.finditer(text):
+        parts.extend([re.sub(r'<tg-button-row>[\s\S]*?</tg-button-row>',row,text[pos:match.start()]),match[0]])
+        pos=match.end()
+    parts.append(re.sub(r'<tg-button-row>[\s\S]*?</tg-button-row>',row,text[pos:]))
+    return ''.join(parts)
+
 def rich_pages(text, limit=24000):
     """Keep normal fences/formulas intact. Bound bytes, paragraphs and block counts."""
     text=normalize_math(text)
@@ -58,34 +71,33 @@ async def send_rich(message, text, markup=None):
         reply_markup=markup.to_dict() if markup else None)
 
 
-def with_code_copy(text):
-    """Keep native code blocks; add clipboard controls where clients lack them.
-
-    CopyTextButton accepts 1–256 characters, so long snippets have numbered parts.
-    No copy-answer button is added. HTML attribute escaping preserves literal code.
-    """
+def with_code_copy(text, download=None):
+    """One control per complete code block. Never split clipboard text."""
     import html
     from markdown_it import MarkdownIt
     tokens=MarkdownIt().parse(text)
     lines=text.splitlines(keepends=True)
-    inserts={}
-    number=0
+    replacements={};number=0
     for token in tokens:
         if token.type not in ('fence','code_block') or not token.content.strip() or not token.map:continue
         number+=1
-        code=token.content.rstrip('\n')
-        parts=[];part='';units=0
-        for char in code:
-            size=len(char.encode('utf-16-le'))//2
-            if units+size>256:
-                parts.append(part);part='';units=0
-            part+=char;units+=size
-        if part:parts.append(part)
-        # Bound markup growth for huge programs; native code remains selectable.
-        if len(parts)>16:continue
-        buttons=[]
-        for index,part in enumerate(parts,1):
-            label=f'Copy code {number}' if len(parts)==1 else f'Copy code {number} · {index}/{len(parts)}'
-            buttons.append('<tg-button-row><tg-button type="copy_text" text="'+html.escape(part,quote=True).replace('\n','&#10;').replace('\r','&#13;').replace('`','&#96;').replace('$','&#36;').replace(chr(92),'&#92;')+'">'+label+'</tg-button></tg-button-row>')
-        inserts[token.map[1]]='\n'+'\n'.join(buttons)+'\n\n'
-    return ''.join(line+inserts.get(index+1,'') for index,line in enumerate(lines))
+        code=token.content
+        start,end=token.map
+        button=''
+        if len(code.rstrip('\n').encode('utf-16-le'))//2<=256:
+            value=html.escape(code.rstrip('\n'),quote=True).replace('\n','&#10;').replace('\r','&#13;').replace('`','&#96;').replace('$','&#36;').replace(chr(92),'&#92;')
+            button=f'<tg-button-row><tg-button type="copy_text" text="{value}">Copy code {number}</tg-button></tg-button-row>'
+        elif download:
+            url=download(number,code,(token.info or '').split()[0] if token.info else '')
+            button=f'<tg-button-row><tg-button type="url" url="{html.escape(url,quote=True)}">Download complete code {number}</tg-button></tg-button-row>'
+        original=''.join(lines[start:end])
+        # Telegram has a finite message size. Large source stays whole in the file.
+        if len(original.encode())>20000 and download:
+            original='This code is too long for one Telegram message. Download the complete file below.\n'
+        replacements[start]=(end,original+'\n'+button+'\n\n' if button else original)
+    result=[];index=0
+    while index<len(lines):
+        if index in replacements:
+            end,value=replacements[index];result.append(value);index=end
+        else:result.append(lines[index]);index+=1
+    return ''.join(result)

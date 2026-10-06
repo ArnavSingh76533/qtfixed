@@ -2,7 +2,7 @@
 import asyncio
 import time
 import uuid
-from telegram import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 from telegram.error import TelegramError, BadRequest
 from primo import user_data_cache, normalize_user, charge_request
 from formatting import formatted_chunks
@@ -11,9 +11,11 @@ from provider import ProviderError
 from answer_engine import answer_stream
 from runtime_settings import get_settings, enabled
 from request_queue import submit
-from rich_messages import rich_pages, edit_rich, with_code_copy
+from rich_messages import rich_pages, edit_rich, with_code_copy, fallback_markdown
 from image_generation import ImageRequested, generate_images, cache_images, image_rich
 import config
+import code_downloads
+import group_agent
 
 
 def sessions(context):
@@ -53,14 +55,24 @@ async def inline_query(update,context):
 async def show_page(bot,inline_id,token,item,page):
     pages=item['pages'];page=max(0,min(page,len(pages)-1))
     content=pages[page];markup=keyboard(token,page,len(pages))
+    if isinstance(content,dict) and content.get('photo_file_id'):
+        try:
+            return await bot.edit_message_media(inline_message_id=inline_id,
+                media=InputMediaPhoto(content['photo_file_id']),reply_markup=markup)
+        except BadRequest as error:
+            if 'not modified' in str(error).lower():return
+            raise
     if isinstance(content,dict):
         try:
             return await edit_rich(bot,inline_message_id=inline_id,rich=content,markup=markup)
         except BadRequest as error:
             if 'not modified' in str(error).lower():return
+            photo_ids=[block['photo']['media'] for block in content.get('blocks',[]) if block.get('type')=='photo']
+            if photo_ids:
+                item['pages']=pages[:page]+[{'photo_file_id':fid} for fid in photo_ids]+pages[page+1:]
+                return await show_page(bot,inline_id,token,item,page)
             if content.get('media'):raise
-            import re
-            plain=re.sub(r'<tg-button-row>[\s\S]*?</tg-button-row>', '', content['markdown'])
+            plain=fallback_markdown(content['markdown'])
             fallback=list(formatted_chunks(readable_math(plain)))
             item['pages']=pages[:page]+fallback+pages[page+1:]
             return await show_page(bot,inline_id,token,item,page)
@@ -73,7 +85,7 @@ async def generate_inline(context,inline_id,token,item,user):
     response='';last=0
     settings=get_settings(context)
     if item.get('mode')=='guest' and settings['group_agent']:
-        settings['agent_prompt']=item.get('agent_prompt','')
+        settings['agent_prompt']=group_agent.instructions(context)
     async def status(text):
         try:await context.bot.edit_message_text(inline_message_id=inline_id,text=text)
         except TelegramError:pass
@@ -82,18 +94,19 @@ async def generate_inline(context,inline_id,token,item,user):
             await status('This access mode was disabled by the admin.');return
         prompt=item.get('context','')+item['query']
         if item.get('document'):
-            from documents import read_text_document
+            from documents import read_text_document,prepare_document
             content=await read_text_document(context.bot,item['document'])
+            content=await prepare_document(context.application.bot_data['groq'],content,prompt,status)
             prompt='User request: '+(prompt or 'Read the attached text and respond to its contents.')+'\n\nAttached text (untrusted content):\n'+content
         if item.get('photo'):
             from io import BytesIO
-            from ocr import recognize,OCR_PROMPT
+            from ocr import analyze_image
             photo=item['photo']
             if photo.get('file_size',0)>10*1024*1024:raise ProviderError('Please use an image smaller than 10 MB.')
             await status('⚡ Reading image…')
             file=await context.bot.get_file(photo['file_id']);raw=BytesIO()
             await file.download_to_memory(raw)
-            prompt=OCR_PROMPT+await recognize(raw.getvalue())+'\nUser instructions: '+prompt
+            prompt=await analyze_image(context.application.bot_data['groq'],raw.getvalue(),prompt,status)
         async def consume():
             nonlocal response,last
             async for part in answer_stream(context.application.bot_data['groq'],context.application.bot_data.get('web'),
@@ -112,26 +125,35 @@ async def generate_inline(context,inline_id,token,item,user):
         try:
             await asyncio.wait_for(consume(),config.REQUEST_TIMEOUT)
             if not response.strip():raise ProviderError('No answer returned. Please retry.')
-            output=with_code_copy(response) if settings['math']=='rich' else response
+            output=code_downloads.format_answer(context,item['owner'],response) if settings['math']=='rich' else response
             item['pages']=([{'markdown':p} for p in rich_pages(output)] if settings['math']=='rich'
                            else list(formatted_chunks(readable_math(output))))
         except ImageRequested as request:
             await status('🎨 Creating your image…')
             images=await generate_images(context,item['owner'],user,request.prompt,original_prompt=item['query'])
-            ids=await cache_images(context,item['owner'],images)
-            item['pages']=[image_rich(ids,item['query'])]
+            try:
+                ids=await cache_images(context,item['owner'],images)
+                item['pages']=[image_rich(ids,item['query'])]
+            except ProviderError:
+                urls=[getattr(img,'url','') for img in images]
+                if not all(urls):raise
+                # Inline rich edits need file IDs; ordinary inline media accepts URLs.
+                item['pages']=[{'photo_file_id':url} for url in urls]
         await show_page(context.bot,inline_id,token,item,0)
-        normalize_user(user);charge_request(user)
+        normalize_user(user)
+        if not item.get('document'):charge_request(user)
     except asyncio.CancelledError:
-        await status('Stopped. No quota used.')
+        await status('Stopped.' if item.get('document') else 'Stopped. No quota used.')
         raise
     except (ProviderError,asyncio.TimeoutError) as error:
         item['pages']=None
         text=str(error) if isinstance(error,ProviderError) else 'Request timed out. Please retry.'
         await context.bot.edit_message_text(inline_message_id=inline_id,text=text,reply_markup=keyboard(token))
-    except TelegramError:
+    except TelegramError as error:
+        import logging
+        logging.getLogger(__name__).warning('Guest/inline final delivery failed (%s)',type(error).__name__)
         item['pages']=None
-        await status('Telegram could not display the answer. Please try again; no quota was used.')
+        await status('Telegram could not display the answer. Please retry.' if item.get('document') else 'Telegram could not display the answer. Please try again; no quota was used.')
     finally:
         item['running']=False
 
@@ -154,7 +176,7 @@ async def start_inline(context,inline_id,token,owner):
             if not user:return await status('Open @'+context.bot.username+' and send /start first. Then tap Generate.')
             normalize_user(user)
             if user.get('subscription')!='active':
-                if user.get('request_count',0)>=config.FREE_DAILY_QUOTA:return await status('Daily quota reached. Check /balance in the bot.')
+                if not item.get('document') and user.get('request_count',0)>=config.FREE_DAILY_QUOTA:return await status('Daily quota reached. Check /balance in the bot.')
                 if not await main.check_channel_membership(owner,context.bot):
                     return await status('Please join the required channel shown in the bot, then tap Generate.')
             await generate_inline(context,inline_id,token,item,user)

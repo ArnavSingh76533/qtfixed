@@ -28,25 +28,37 @@ Restart your bot process. Keep your existing `DATA_DIR`, JSON files, databases a
   setup by default (`WEB_ENABLED` supplies the initial value). Saved admin choices
   take precedence after restart. This applies to normal, inline, guest and `/web`
   requests, including the backup. Already-running requests finish with their
-  captured settings. The group-agent switch is on the same admin-only panel.
+  captured settings. The custom system-prompt switch is on the same admin-only panel.
 - **Text files:** send a UTF-8 `.txt`, optionally with instructions in the caption,
   or reply to one with `/ask your question`. Guest requests also accept the text
-  attachment supplied by Telegram. Limits: 128 KB and 30,000 characters. Empty,
-  binary, oversized and invalid UTF-8 uploads receive an explanation. Files are
-  treated as input data, never executed. Inline queries cannot carry attachments.
+  attachment supplied by Telegram. **Text-file questions and their retries have no
+  bot question quota**, even when the normal 40-question allowance is exhausted.
+  The old 30,000-character limit is removed. Larger files are read section by
+  section and condensed for the final model; this can take longer and use more
+  provider tokens. Summaries can lose detail, so ask a specific question for large
+  files. Telegram cloud downloads still have a 20 MB transport limit. Empty,
+  binary and invalid UTF-8 files receive an explanation. Membership checks still
+  apply. Files are input data, never executed. Inline queries cannot carry attachments.
 - **Answers only:** no “Asked:” header. Mentioning the guest bot while replying
   without a new question passes the replied text directly, without the old
   “Please explain the message I replied to” placeholder.
 - **Code copying:** native fenced code blocks remain. Because the Bot API has no
   switch to force a clipboard icon inside those blocks, final rich answers also
   include **Copy code** controls for snippets. Telegram limits each clipboard
-  button to 256 UTF-16 units; longer snippets get numbered parts (up to 16).
-  Larger programs remain selectable in their native code block. No Copy answer
-  button is restored. Client versions determine native long-press behavior.
+  button to 256 characters (the bot counts UTF-16 conservatively). **A code block
+  is never divided into clipboard parts.** Short blocks get one Copy code
+  control; longer programs get one **Download complete code** link containing
+  the entire block unchanged. Independent examples remain separate. Downloads
+  open in the requester’s bot DM, expire after one hour/restart, and only the
+  requester can access them. Very long blocks are shown as a file link instead
+  of fragmented messages. No Copy answer button is restored. Client versions
+  determine native long-press behavior.
 - **Images:** regular, group, inline and guest answers embed generated photos in
   rich messages. Set `IMAGE_CACHE_CHAT_ID` to a private upload channel where the
   bot can post/delete. If empty, it uses `LOG_CHANNEL_ID`; it never stages images
-  in the requester's DM. If both are empty, configure an upload chat first.
+  in the requester's DM. If staging or rich delivery fails, the bot tries native
+  photo delivery in the same chat/guest message using the verified provider URL
+  or downloaded bytes. Premium galleries become paged photos when needed.
 - **Broadcast media:** reply to a photo, video, animation/GIF, audio, document or
   formatted text with `/broadcast --user` or `/broadcast --group` (both flags may
   be combined). Preview and Start controls remain. Native copying preserves the
@@ -56,25 +68,30 @@ Restart your bot process. Keep your existing `DATA_DIR`, JSON files, databases a
   delete the source until the campaign completes. Partial album copies become
   uncertain deliveries, preventing automatic duplicate sends.
 
-### Group instructions from agent.md
+### Custom system prompt: /agents
 
-Only the configured **bot owner (`ADMIN_ID`)** can install or clear instructions;
-ordinary members and other group admins cannot change them.
+Only the configured **bot owner (`ADMIN_ID`)** can install, change, disable or
+clear this prompt. Other group administrators cannot change it.
 
-1. Upload `agent.md` (UTF-8, at most 16,000 characters), then reply `/agent`.
-   Alternatively, upload it with caption `/agent`.
-2. In a group, this configures that group. In the bot DM, it configures all groups.
-   Use `/agent -1001234567890` in DM to configure a particular group.
-3. `/agent [all|-group_id] status` checks the override;
-   `/agent [all|-group_id] clear` removes it. A group-specific override takes
-   precedence over the all-groups default. With neither, the original system
-   prompt is used. `/settings` → **Group agent OFF** ignores all overrides.
+1. Send `/agents`, then upload any **UTF-8 plain-text file**, regardless of its
+   filename/extension, in the same chat within ten minutes. You can also reply to
+   a file with `/agents`, or upload the file with caption `/agents`.
+2. The uploaded text **replaces the default base system prompt for all groups and
+   all guest replies**, including guests in personal chats. Ordinary bot DMs and
+   ordinary inline queries keep the original system prompt. Formatting/tool-use
+   instructions and admin settings still apply.
+3. `/agents status` shows whether a custom prompt is active. `/agents clear`
+   restores the original default. `/agent` remains a compatibility alias.
+4. In the owner's private `/settings`, use **Upload system prompt**, **Custom
+   prompt ON/OFF**, or **Restore default prompt**. Disabling retains the saved
+   prompt for later; clearing removes the active override.
 
-These are conversational instructions appended to the system prompt, not a
-shell/filesystem agent. They apply to group answers and group guest summons;
-private chats and ordinary inline queries keep the original prompt. Telegram
-privacy settings and `GROUP_MENTIONS_ONLY` still determine which group messages
-are delivered/answered. Instructions persist separately in `group_agents.json`.
+This is a system instruction, not an executable agent. It persists in
+`system_prompt.json`. The previous global `group_agents.json` override is imported
+if no new prompt file exists; legacy per-group records remain untouched but no
+longer apply. In-flight requests use their captured prompt. Custom instructions
+have a 60,000-character model-context allowance, separate from quota-free question
+files. Telegram privacy and group enablement still determine message delivery.
 
 Provider and Telegram calls are mocked in the tests; live delivery still depends
 on your deployed credentials, server/API version and bot permissions.
@@ -83,7 +100,7 @@ on your deployed credentials, server/API version and bot permissions.
 
 Update with `git pull`, install `requirements.txt`, fill the new image keys in
 `.env`, and restart. Open **/settings in the bot owner's private chat**. These
-settings apply globally: web search, group agent, streaming, answer style, reasoning and Rich/Unicode
+settings apply globally: web search, custom group/guest prompt, streaming, answer style, reasoning and Rich/Unicode
 formatting. Old per-chat settings are retained on disk but no longer applied.
 Regular users cannot open settings, change them through old buttons, or use
 `/model`. Public menus and answer buttons contain no settings/model controls.
@@ -123,7 +140,8 @@ IMAGE_CACHE_CHAT_ID=
 ```
 
 Use `/image <description>` (aliases `/flux` and `/flux2`), reply to a prompt with
-`/image`, or naturally ask to create/draw a picture. Clear image requests route
+`/image`, or naturally ask to create/draw/send/show a picture (for example,
+“Send image of moon”). Clear image requests route
 directly; the language model also has a `generate_image` tool for other phrasing.
 The first provider is **fal FLUX Schnell over HTTPS**; service/configuration or
 invalid-image failures trigger **getimg FLUX Schnell**. Provider content rejections
@@ -147,7 +165,12 @@ channel. Without it, the configured log chat is used; requesting users never
 receive staging uploads. Staging messages are deleted after obtaining file IDs.
 If deletion fails, they may remain in the cache/log chat. The bot needs permission
 to send photos and delete its own messages in that chat.
-No live image-generation calls are made by the test suite.
+If rich media is rejected, the bot edits the same inline/guest message into a
+native photo; premium images get Previous/Next controls. If staging is unavailable,
+a verified provider URL can be used for the native photo. Regular chats fall back
+to a photo/album in that same chat. A network timeout is not automatically replayed
+because delivery may already have succeeded. No live image-generation calls are
+made by the test suite.
 
 ### Request queue
 
@@ -171,7 +194,7 @@ python -m pip install -r requirements.txt
 Restart the bot after installing dependencies. Existing `.env`, JSON, and runtime
 state are preserved by Git because they are ignored. Keep your original records
 in the same DATA_DIR. The free quota is now **40**, shared by regular, image, web,
-and inline answers. Existing usage counts are retained; this update does not reset
+and inline/guest answers. Text-file questions are quota-free. Existing usage counts are retained; this update does not reset
 them. The Copy answer button is removed; Telegram's native code selection remains.
 
 ### Groups
@@ -196,7 +219,10 @@ them. The Copy answer button is removed; Telegram's native code selection remain
 
 Send a photo or an image document. You can also reply to an image with `/ocr` or
 `/ask explain this`. The bot downloads the image, extracts text, appends your caption
-and an embedded solve/explain instruction, then uses the normal AI/web answer flow.
+and your instructions, then uses the normal AI/web answer flow. When OCR is short,
+garbled, unavailable, or the question needs visual details, Groq vision examines
+the image. The main chat model then reviews both the OCR and visual observations
+before answering; vision does not replace the main text model.
 Quota is charged once, only after a completed answer is delivered.
 
 The original `compscilib.com/image-to-text` endpoint is restored. Since that external
@@ -212,11 +238,19 @@ Optional `.env` settings:
 ```dotenv
 OCR_MODE=auto
 OCR_URL=https://ai-service-prod.compscilib.com/image-to-text
+VISION_ENABLED=true
+GROQ_VISION_MODEL=qwen/qwen3.8-27b
 WEB_ENABLED=true
 GROUP_MENTIONS_ONLY=false
 ```
 
-`OCR_MODE=local` keeps images on your server; `remote` uses the configured API.
+`OCR_MODE=local` runs OCR on your server; `remote` uses the configured OCR API.
+Vision is enabled by default and uses the existing `GROQ_API_KEY`. With vision
+enabled, images needing review can still be sent to Groq even with local OCR.
+Set `OCR_MODE=local` **and** `VISION_ENABLED=false` to keep image bytes local.
+OCR quality checks are heuristics, not a guaranteed confidence score. If vision
+fails but OCR exists, the bot uses that transcript and flags missing visual
+verification; if both fail, it asks for a clearer image/configuration check.
 Local Tesseract works best on clear printed text; handwriting and dense math can
 be inaccurate. The solve prompt asks the AI to request clarification for unreadable
 symbols. File size is limited to 10 MB, decoded images to 25 megapixels, and OCR
@@ -341,7 +375,8 @@ New runtime files are created separately:
 | `campaigns.sqlite3` | Campaign definitions, recipient delivery states, blocked-recipient list |
 | `ads.json` | Saved ad text |
 | `bot_settings.json` | Log-channel changes made through `/setlogchannel` |
-| `global_settings.json` | Admin-only global formatting, style, streaming and access mode |
+| `global_settings.json` | Admin-only global formatting, style, streaming, web and access mode |
+| `system_prompt.json` | Owner-uploaded base system prompt for all groups and guest replies |
 
 Back up the entire data directory with the bot stopped, including SQLite files.
 The automatic hourly backup covers **user_data.json only**. JSON files use atomic
@@ -497,6 +532,7 @@ requires admin maintenance; no automatic probing is performed.
 |---|---|
 | `/settings` | Private admin-only global preferences and Inline/Guest/Off mode |
 | `/model` | Private admin-only model configuration |
+| `/agents`, `/agents status`, `/agents clear` | Upload, inspect or clear the global group/guest system prompt |
 | `/stats` | User/premium/group totals and active AI request count |
 | `/gencharlie037` | Generate a premium code; admin only |
 | `/resetcount` | Reset all bot quotas |

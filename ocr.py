@@ -75,3 +75,34 @@ async def recognize(raw, client=None):
     text=await local_ocr(raw)
     if not text:raise ProviderError('No readable text found. Please send a sharper, cropped photo.')
     return text[:20000]
+
+
+def needs_vision(text, question=''):
+    """OCR has no calibrated confidence score; use transparent quality signals."""
+    import re
+    if not question.strip() or re.search(r'\bread (?:the |this )?image\b',question,re.I):return True
+    if len(text.strip())<30:return True
+    if '\ufffd' in text or text.count('?')>max(3,len(text)//40):return True
+    useful=sum(c.isalnum() for c in text)
+    if useful<max(10,len(text)//4):return True
+    visual=re.compile(r'\b(describe|identify|recognize|colour|color|graph|chart|diagram|geometry|shape|object|scene|photo|picture|look|visual|accurate|wrong|incorrect)\b|what.*(?:image|see)|\bsolve\b',re.I)
+    return bool(visual.search(question))
+
+
+async def analyze_image(groq,raw,question='',on_status=None):
+    text='';failure=None
+    try:text=await recognize(raw)
+    except ProviderError as error:failure=error
+    use_vision=needs_vision(text,question)
+    if use_vision and config.VISION_ENABLED:
+        if on_status:await on_status('⚡ Checking visual details…')
+        try:
+            details=await groq.describe_image(raw,question,text)
+            return ('Review the image evidence below and answer the user request. OCR and vision may be wrong; '
+                    'reconcile them, and do not invent details.\n\nOCR transcript:\n'+(text or '(No reliable OCR text.)')+
+                    '\n\nVisual observations:\n'+details+'\n\nUser request: '+(question or 'Explain and solve the image question.'))
+        except ProviderError:
+            if not text:raise
+            return OCR_PROMPT+text+'\n\nVisual analysis was unavailable. This transcript may be incomplete; do not claim to have verified non-text details.\nUser request: '+question
+    if not text:raise failure or ProviderError('No readable text was found. Please send a clearer image.')
+    return OCR_PROMPT+text+'\n\nUser request: '+question
