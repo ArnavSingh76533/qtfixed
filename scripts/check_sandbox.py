@@ -59,7 +59,8 @@ with sync_playwright() as p:
         proxy={'server':os.environ['HTTPS_PROXY']})
     page=browser.new_page()
     response=page.goto('https://example.com/',wait_until='domcontentloaded',timeout=15000)
-    assert response.status==200 and 'Example Domain' in page.locator('body').inner_text()
+    body=page.locator('body').inner_text()
+    assert response.status==200 and 'Example Domain' in body, (response.status,page.url,body[:500])
     response=page.goto('http://169.254.169.254/',wait_until='domcontentloaded',timeout=5000)
     assert response.status==403
     browser.close()
