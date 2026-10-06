@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, '/')  # Trusted, read-only image module; Python -I excludes script paths.
 from public_web import connect_public, web_url
 
-MAX_BYTES=8*1024*1024
+MAX_BYTES=64_000_000
 SLOTS=threading.BoundedSemaphore(16)
 
 class Handler(socketserver.BaseRequestHandler):

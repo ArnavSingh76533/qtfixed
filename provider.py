@@ -30,13 +30,13 @@ class GroqClient:
     async def close(self):
         await self.client.aclose()
 
-    async def complete(self,messages,tools=None,json_mode=False,max_tokens=4096):
+    async def complete(self,messages,tools=None,json_mode=False,max_tokens=4096,tool_choice=None):
         """Bounded non-streaming decisions for planning/tool execution; never replay tools."""
         payload={'model':config.GROQ_MODEL,'messages':messages,'stream':False,
                  'max_completion_tokens':max_tokens}
         if config.GROQ_MODEL.startswith('openai/gpt-oss-'):
             payload.update(include_reasoning=False,reasoning_effort='low')
-        if tools:payload.update(tools=tools,tool_choice='auto',parallel_tool_calls=False)
+        if tools:payload.update(tools=tools,tool_choice=tool_choice or 'auto',parallel_tool_calls=False)
         if json_mode:payload['response_format']={'type':'json_object'}
         for attempt in range(3):
             try:

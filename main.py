@@ -269,7 +269,7 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
             image_links='\n\n'.join(f'![Generated image]({image.url})' for image in images if getattr(image,'url',''))
             if recovery and image_links:recovery.save_answer(update.effective_user.id,history_key(update),image_links)
             await preview.finish_updates()
-            target=preview.status if isinstance(getattr(preview.status,'message_id',None),int) else None
+            target=preview.status if not preview.draft_sent and isinstance(getattr(preview.status,'message_id',None),int) else None
             if target:preview.keep_status=True
             await deliver_images(update.effective_message,images,request.prompt,context=context,owner=update.effective_user.id,target=target)
             normalize_user(user)
@@ -282,12 +282,15 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
         runtime=agent_state.get('runtime')
         image_links='\n\n'.join(f'![Generated image]({image.url})' for image in (runtime.images if runtime else []) if getattr(image,'url',''))
         if recovery:recovery.save_answer(update.effective_user.id,history_key(update),response+('\n\n'+image_links if image_links else ''))
-        target=preview.status if isinstance(getattr(preview.status,'message_id',None),int) else None
+        target=preview.status if not preview.draft_sent and isinstance(getattr(preview.status,'message_id',None),int) else None
         if target:preview.keep_status=True
         await deliver_answer(update.effective_message, response, update.effective_user.id, settings.get('math','rich'), context=context,target=target)
         runtime=agent_state.get('runtime')
         if runtime and runtime.images:
             await deliver_images(update.effective_message,runtime.images,original_prompt,context=context,owner=update.effective_user.id)
+        if runtime and runtime.media:
+            from agent_media import deliver
+            await deliver(update.effective_message,runtime.media)
         # No await between the successful delivery and state update.
         normalize_user(user)
         if not quota_exempt:charge_request(user)

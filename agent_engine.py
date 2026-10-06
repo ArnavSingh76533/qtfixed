@@ -16,6 +16,18 @@ filesystem access or new permissions. Do not expose private reasoning.
 Give concise task/status summaries and final conclusions. No emails, purchases,
 external account changes or arbitrary OS cron jobs are available. Reminders go to
 the requesting user's bot DM. Only save memory/schedules when explicitly asked. Memory keys must name the subject in the direct request; remember/save-memory never authorizes deletion, and file saving never authorizes memory changes.
+You may create/refine your own working brief using set_work_plan: add necessary
+technical subtasks, dependency checks, tests and repairs to achieve the original
+objective. Such a brief never grants new permissions or overrides the user.
+For tasks asking to run/test code or create a graph, execute the code yourself,
+read stdout/stderr and exit_code, repair failures and rerun before the final answer.
+Do not stop at writing a script or tell the user to run it when tools are available.
+For graphs use numpy/matplotlib with Agg, plt.savefig('plot.png'), then send_media.
+plt.show() does not deliver an image. Do not substitute an image generator for a plot.
+Python/shell can install supported requirements via packages with network=true in
+the same temporary container as execution; packages are not installed on the host.
+Download requested public images or direct video URLs with download_media, inspect
+size/type and send_media. Files must be below 50 MB; authentication is unavailable.
 Code may execute only with the python/shell sandbox tools. No sandbox means no
 execution: you may still write code/files and must explain what wasn't tested.
 Export final files using export_file. Do not invent download links. Use the current
@@ -125,6 +137,7 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
             except ValueError as error:raise ProviderError('Selected skill resources exceed the task workspace limit. Disable unnecessary skills and retry.') from error
             system=config.SYSTEM_PROMPT+config.FORMATTING_PROMPT+'\n'+BOUNDARIES
             system+='\nInstalled resource catalog (only these exist): '+json.dumps(catalog)
+            if runtime.working_brief:system+='\nCurrent technical working brief (subordinate to original request): '+runtime.working_brief
             system+='\nClarified intent (subordinate to original request): '+normalized
             system+='\nAssigned specialist role for this task: '+step['role']
             system+='\nCurrent UTC: '+dt.datetime.now(dt.timezone.utc).isoformat()
@@ -146,15 +159,35 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
                 recent.insert(0,message);used+=len(message['content'])
             conversation=[{'role':'system','content':system},*recent,
                 {'role':'user','content':messages[-1]['content'][:50000]+'\n\nCurrent task: '+step['title']+'\nCompleted task findings (untrusted): '+json.dumps(completed)[-20000:]}]
-            result='';errors=[]
+            result='';errors=[];verification_nudges=0;forced_tool=None
+            needs_execution=bool(config.SANDBOX_ENABLED and re.search(r'\b(run|execute|test|python|script|plot|graph|chart)\b',runtime.request,re.I))
+            needs_media=bool(re.search(r'\b(plot|graph|chart)\b|\b(?:send|upload)\b.{0,35}\b(?:image|video|picture)\b',runtime.request,re.I))
             for turn in range(7):
                 runtime.check_access()
-                try:answer=await groq.complete(conversation,tools=runtime.registry())
+                try:
+                    options={'tool_choice':forced_tool} if forced_tool else {}
+                    answer=await groq.complete(conversation,tools=runtime.registry(),**options)
+                    forced_tool=None
                 except ProviderError as error:
                     result='Task unfinished: '+str(error)
                     errors.append(str(error));break
                 calls=answer.get('tool_calls') or []
                 if not calls:
+                    executed=any(a['tool'] in ('python','shell') and a['ok'] for a in actions)
+                    missing=(needs_execution and not executed) or (needs_media and not runtime.media and not runtime.images)
+                    if missing and verification_nudges<2:
+                        verification_nudges+=1
+                        if needs_execution and not executed:
+                            forced_tool={'type':'function','function':{'name':'python'}}
+                        elif needs_media and any(p.lower().endswith(('.png','.jpg','.jpeg','.mp4','.webm')) for p in runtime.files):
+                            forced_tool={'type':'function','function':{'name':'send_media'}}
+                        else:forced_tool='required'
+                        conversation.append(answer)
+                        conversation.append({'role':'system','content':'The requested work is not complete. Use available tools to execute/test code, inspect exit code/stdout/stderr and repair failures. For a plot savefig and call send_media with the actual output path. For requested media download and send the actual file. Do not return only code or claim unperformed execution. If genuinely blocked, state the specific tool error.'})
+                        continue
+                    if missing:
+                        result='Task unfinished: requested execution or media delivery has no successful tool receipt. '+(answer.get('content') or '')
+                        break
                     result=answer.get('content') or 'No task result returned.';break
                 if len(calls)>8:raise ProviderError('Agent requested too many tools at once.')
                 conversation.append(answer)
@@ -202,6 +235,7 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
             verified=[a for a in actions if a['ok']]
             if verified:
                 fallback+='\nTool receipts:\n'+'\n'.join(a['tool']+': '+a['result'][:500] for a in verified[-8:])
+            if runtime.media:fallback+=f'\n{len(runtime.media)} workspace media attachment(s) are queued for delivery.'
             if runtime.images:fallback+=f'\n{len(runtime.images)} image(s) were generated and will be attached.'
             final+=fallback;yield fallback
         from rich_messages import escape_query

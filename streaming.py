@@ -18,6 +18,7 @@ class StreamPreview:
         self.next_update = 0
         self.last_text = ''
         self.keep_status = False
+        self.draft_sent = False
         self.pending_text=None
         self.preview_task=None
         self.draft = config.DRAFT_STREAMING and message.chat.type == 'private'
@@ -70,6 +71,8 @@ class StreamPreview:
         self.last_update = now
         try:
             if self.draft:
+                previous_draft=self.draft_sent
+                self.draft_sent=True  # A timeout may still have shown the native draft.
                 try:
                     if self.rich:
                         await api(self.bot,'sendRichMessageDraft',chat_id=self.message.chat_id,
@@ -78,7 +81,9 @@ class StreamPreview:
                     else:
                         await self.bot.send_message_draft(chat_id=self.message.chat_id,
                             draft_id=self.draft_id,text=preview,message_thread_id=self.message.message_thread_id)
+                    self.draft_sent = True
                 except BadRequest:
+                    self.draft_sent=previous_draft
                     self.draft = False
             if not self.draft:
                 markup=InlineKeyboardMarkup([[InlineKeyboardButton('⏹ Stop', callback_data=f'chat:stop:{self.owner}',style='danger')]])

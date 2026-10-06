@@ -253,7 +253,7 @@ class SchedulerTests(AgentTestBase):
 class SandboxTests(unittest.IsolatedAsyncioTestCase):
     def test_container_flags_and_calculator_does_not_eval_code(self):
         command=Sandbox().command('qtfixed-test')
-        for flag in ('--network=none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user=65534:65534','--pids-limit=64'):self.assertIn(flag,command)
+        for flag in ('--network=none','--read-only','--cap-drop=ALL','--security-opt=no-new-privileges','--user=65534:65534','--pids-limit=128'):self.assertIn(flag,command)
         self.assertNotIn('-v',command);self.assertNotIn('--privileged',command)
         self.assertEqual(calculate('6*7'),42)
         for expression in ('__import__("os").system("id")','2**99999'):

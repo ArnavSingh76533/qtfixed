@@ -1,5 +1,6 @@
 """Owner-bound tool registry. Tool arguments cannot select another user or host path."""
 import ast
+import asyncio
 import base64
 import datetime as dt
 import json
@@ -28,12 +29,15 @@ TOOLS=[
     spec('read_file','Read a UTF-8 workspace resource; offset is characters.',{'path':'string','offset':'integer'},['path']),
     spec('write_file','Create/update a UTF-8 workspace file; no host filesystem access.',{'path':'string','content':'string'},['path','content']),
     spec('export_file','Make a completed workspace file downloadable to the requesting user.',{'path':'string'},['path']),
-    spec('python','Run Python in the isolated container. Set network=true for live public HTTP/HTTPS via its proxy (requests/urllib). No host files or credentials. requests, bs4 and openpyxl are installed.',{'code':'string','network':'boolean'},['code']),
-    spec('shell','Run shell only in the isolated container workspace. Set network=true for proxy-aware public HTTP/HTTPS. No host access.',{'command':'string','network':'boolean'},['command']),
+    spec('python','Run Python in the isolated container. Set network=true for live public HTTP/HTTPS via its proxy (requests/urllib). No host files or credentials. numpy, matplotlib (Agg), Pillow, requests and bs4 are installed. Save plots with plt.savefig, not plt.show. Optional packages is a space-separated supported PyPI list installed only in this container; use network=true.',{'code':'string','network':'boolean','packages':'string'},['code']),
+    spec('shell','Run shell only in the isolated container workspace. Set network=true for proxy-aware public HTTP/HTTPS. No host access. Optional packages installs supported PyPI dependencies in this temporary container; use network=true.',{'command':'string','network':'boolean','packages':'string'},['command']),
     spec('fetch_url','Fetch the actual live HTML/JSON/text at a public URL, save the raw body to path, and return readable text, links, status and timestamp. Read the saved file in sections for scripts/embedded data. No browser JavaScript execution.',{'url':'string','path':'string'},['url','path']),
     spec('browse_url','Render a public web page with sandboxed headless Chromium when fetch_url lacks JavaScript-generated content. Save rendered HTML to path and return visible text, links, HTTP status and timestamp. No logins or CAPTCHA bypass.',{'url':'string','path':'string'},['url','path']),
     spec('web_search','Search current facts; synthesize returned evidence with sources.',{'query':'string'},['query']),
     spec('generate_image','Generate requested images and embed them in this chat after completion.',{'prompt':'string'},['prompt']),
+    spec('download_media','Download a public image or direct MP4/WebM URL under 50 MB into the task workspace; respects global Web. Use send_media afterwards.',{'url':'string','path':'string'},['url','path']),
+    spec('send_media','Queue an actual workspace image/video under 50 MB for delivery in this chat. Must exist; no invented paths. Graphs use Python savefig then send_media.',{'path':'string','caption':'string'},['path']),
+    spec('set_work_plan','Refine your own temporary technical working instructions/subtasks as evidence changes. Subordinate to the original user request; cannot grant permissions or change user/global prompts.',{'brief':'string'},['brief']),
     spec('memory_list','Recall memories for this user in this conversation scope only.',{}),
     spec('memory_save','Only when the user explicitly asks to remember/save: save a fact in this scope.',{'name':'string','value':'string'},['name','value']),
     spec('memory_delete','Only when explicitly asked to forget: delete a named memory in this scope.',{'name':'string'},['name']),
@@ -110,10 +114,18 @@ class ToolRuntime:
         self.context,self.owner,self.user,self.scope=context,owner,user,scope
         self.request,self.settings=request,settings
         self.store=context.application.bot_data['agent_store']
-        self.files={};self.exports={};self.exported_content={};self.images=[];self.calls=0;self.run_id=None
+        self.files={};self.exports={};self.exported_content={};self.images=[];self.media=[];self.working_brief="";self.calls=0;self.run_id=None
+    def export(self,path,raw):
+        if self.exported_content.get(path)!=self.files[path]:
+            self.exports[path]=artifact(self.context,self.owner,path,raw)
+            self.exported_content[path]=self.files[path]
+            if self.run_id:
+                token=self.exports[path].split('file_',1)[1]
+                self.store.add_artifact(self.owner,self.run_id,path,token)
+        return {'download':self.exports[path]}
     def registry(self):
         disabled=set()
-        if not self.settings['web']:disabled.update(('web_search','fetch_url','browse_url'))
+        if not self.settings['web']:disabled.update(('web_search','fetch_url','browse_url','download_media'))
         if not available():disabled.add('generate_image')
         if not config.SANDBOX_ENABLED:disabled.update(('python','shell'))
         if not config.SANDBOX_ENABLED or not config.SANDBOX_WEB_ENABLED:disabled.add('browse_url')
@@ -133,6 +145,27 @@ class ToolRuntime:
         for key,value in args.items():
             expected={'string':str,'integer':int,'boolean':bool}[schema['properties'][key]['type']]
             if type(value)!=expected:raise ValueError('Invalid tool argument type.')
+        if name=='set_work_plan':
+            brief=args['brief'].strip()
+            if not brief or len(brief)>4000:raise ValueError('Working brief must contain 1–4,000 characters.')
+            self.working_brief=brief
+            return {'working_brief':brief,'authorization':'Original user request and existing tool restrictions still apply.'}
+        if name=='download_media':
+            from agent_media import download,media_kind
+            path=safe_path(args['path']);raw,url=await download(args['url'])
+            kind=await asyncio.to_thread(media_kind,raw,path)
+            proposed={**self.files,path:base64.b64encode(raw).decode()};validate_files(proposed);self.files=proposed
+            return {'saved':path,'bytes':len(raw),'kind':kind,'source':url,'next':'Call send_media to deliver the actual file.'}
+        if name=='send_media':
+            from agent_media import media_kind
+            path=safe_path(args['path'])
+            if path not in self.files:raise ValueError('Media file does not exist. Run code or download_media first.')
+            raw=base64.b64decode(self.files[path]);kind=await asyncio.to_thread(media_kind,raw,path)
+            if not any(item['path']==path for item in self.media):
+                if len(self.media)>=4:raise ValueError('At most four media attachments per task.')
+                self.media.append({'path':path,'data':raw,'kind':kind,'caption':args.get('caption',path)[:900]})
+            receipt=self.export(path,raw)
+            return {'queued_media':path,'kind':kind,'bytes':len(raw),'download':receipt['download'],'delivery':'The bot will attach this actual file after the answer; queued is not yet delivered.'}
         if name=='calculator':return {'result':calculate(args['expression'])}
         if name=='current_time':return {'utc':dt.datetime.now(dt.timezone.utc).isoformat(),'timezone':self.store.prefs(self.owner)['timezone']}
         if name=='list_files':return {'files':list(self.files)}
@@ -146,13 +179,7 @@ class ToolRuntime:
             if path not in self.files:raise ValueError('File does not exist in this task.')
             raw=base64.b64decode(self.files[path])
             if name=='export_file':
-                if self.exported_content.get(path)!=self.files[path]:
-                    self.exports[path]=artifact(self.context,self.owner,path,raw)
-                    self.exported_content[path]=self.files[path]
-                    if self.run_id:
-                        token=self.exports[path].split('file_',1)[1]
-                        self.store.add_artifact(self.owner,self.run_id,path,token)
-                return {'download':self.exports[path]}
+                return self.export(path,raw)
             start=max(0,args.get('offset',0));text=raw.decode('utf-8')
             return {'content':text[start:start+14000],'total_characters':len(text),'next_offset':start+14000 if start+14000<len(text) else None}
         if name=='browse_url':
@@ -196,7 +223,11 @@ with sync_playwright() as p:
         if name in ('python','shell'):
             network=args.get('network',False)
             if network and not self.settings['web']:raise ValueError('The owner disabled web access. Offline execution is still available.')
-            result=await self.context.application.bot_data['sandbox'].execute(args.get('code',args.get('command')),self.files,name,network=network)
+            options={'network':network}
+            if args.get('packages'):
+                from sandbox_dependencies import requirements
+                options['packages']=requirements(args['packages'])
+            result=await self.context.application.bot_data['sandbox'].execute(args.get('code',args.get('command')),self.files,name,**options)
             self.files=result.pop('files')
             if result['exit_code']!=0:result['error']='Code test failed; inspect stderr, fix the code and retest. Do not claim success.'
             return {**result,'files':list(self.files)}

@@ -2,7 +2,7 @@
 import asyncio
 import time
 import uuid
-from telegram import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from telegram import InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from telegram.error import TelegramError, BadRequest
 from primo import user_data_cache, normalize_user, charge_request
 from formatting import formatted_chunks
@@ -57,7 +57,12 @@ async def inline_query(update,context):
 async def show_page(bot,inline_id,token,item,page):
     pages=item['pages'];page=max(0,min(page,len(pages)-1))
     content=pages[page];markup=keyboard(token,page,len(pages))
+    if isinstance(content,dict) and content.get('media_file_id'):
+        constructors={'photo':InputMediaPhoto,'video':InputMediaVideo,'document':InputMediaDocument}
+        item['native_media']=True
+        return await bot.edit_message_media(inline_message_id=inline_id,media=constructors[content['kind']](content['media_file_id']),reply_markup=markup)
     if isinstance(content,dict) and content.get('photo_file_id'):
+        item['native_media']=True
         try:
             return await bot.edit_message_media(inline_message_id=inline_id,
                 media=InputMediaPhoto(content['photo_file_id']),reply_markup=markup)
@@ -69,6 +74,10 @@ async def show_page(bot,inline_id,token,item,page):
             return await edit_rich(bot,inline_message_id=inline_id,rich=content,markup=markup)
         except BadRequest as error:
             if 'not modified' in str(error).lower():return
+            media_blocks=[b for b in content.get('blocks',[]) if b.get('type') in ('video','document')]
+            if media_blocks:
+                item['pages']=pages[:page]+[{'kind':b['type'],'media_file_id':b[b['type']]['media']} for b in media_blocks]+pages[page+1:]
+                return await show_page(bot,inline_id,token,item,page)
             photo_ids=[block['photo']['media'] for block in content.get('blocks',[]) if block.get('type')=='photo']
             if photo_ids:
                 item['pages']=pages[:page]+[{'photo_file_id':fid} for fid in photo_ids]+pages[page+1:]
@@ -79,6 +88,8 @@ async def show_page(bot,inline_id,token,item,page):
             item['pages']=pages[:page]+fallback+pages[page+1:]
             return await show_page(bot,inline_id,token,item,page)
     text,entities=content
+    if item.get('native_media'):
+        return await bot.edit_message_caption(inline_message_id=inline_id,caption=text[:1000],reply_markup=markup)
     await bot.edit_message_text(inline_message_id=inline_id,text=text,entities=entities,reply_markup=markup)
 
 
@@ -138,6 +149,12 @@ async def generate_inline(context,inline_id,token,item,user):
             recovery=context.application.bot_data.get('agent_store')
             if recovery:recovery.save_answer(item['owner'],'external-last',response)
             runtime=agent_state.get('runtime')
+            if runtime and runtime.media:
+                from agent_media import cache
+                try:item['pages']=await cache(context,item['owner'],runtime.media)+item['pages']
+                except ProviderError as error:
+                    response+='\n\n'+str(error)
+                    item['pages']+=list(formatted_chunks(str(error)))
             if runtime and runtime.images:
                 try:
                     ids=await cache_images(context,item['owner'],runtime.images)

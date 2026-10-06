@@ -24,6 +24,49 @@
   `MAX_CONCURRENT_REQUESTS` active generations. Different users run concurrently.
   These bounds prevent unlimited task spawning; they do not guarantee network uptime.
 
+### Executed graphs, task media and revised working plans
+
+- Native draft replies finish with a new final message, rather than editing the
+  earlier progress message. This ends the temporary draft and removes stale text
+  such as the “Hey” shown below an already completed answer. Progress is deleted.
+- Agent graph requests must use the Python tool, inspect exit code/stdout/stderr,
+  save the figure with `plt.savefig('plot.png')`, then call `send_media`. Returning
+  only plotting code is incomplete; bounded tool-choice nudges require execution
+  and an actual media file when these requested steps were omitted.
+- The rebuilt image includes numpy, Matplotlib (Agg), Pillow and FFmpeg. Graphs
+  are mathematical plots, not image-generator output. BLAS thread counts are
+  bounded for a small VPS. Dependencies never install into your bot environment.
+- Python/shell tools accept optional `packages`, a space-separated supported PyPI
+  list (optionally exact versions), with `network=true`. Packages install into
+  `.packages` in the same temporary container before code runs. The install and
+  execution share the time limit; failed installs do not run the code. A new tool
+  call uses a new container, so request dependencies again when needed. Supported
+  names include sympy, scipy, pandas, seaborn, plotly, imageio and yt-dlp; URLs,
+  local paths, editable installs and pip flags are rejected. Web must be enabled.
+- `download_media(url,path)` retrieves a direct public image/MP4/WebM URL with
+  redirect/DNS/IP checks, bounded time and a strict **less than 50,000,000 bytes**
+  limit. A page URL is not a video; inspect it/find the real media source first.
+  Supported downloader code may use yt-dlp in the public sandbox where the site
+  allows access. Login requirements, unsupported sites and oversized files fail.
+- `send_media(path,caption)` checks the real workspace file and queues delivery
+  in the original chat. Photos up to Telegram's 10 MB photo limit are displayed
+  as photos; larger images and WebM are sent as documents, MP4 as video. Files
+  are also available through owner-checked `/agentstatus` download links.
+- Inline/guest attachments upload to `IMAGE_CACHE_CHAT_ID` or the writable log
+  chat, then use existing Telegram file IDs in rich photo/video/document blocks.
+  Native media edits are the fallback. Configure that staging chat for external
+  media delivery; a missing upload chat leaves a recoverable download link.
+- Workspace outputs total at most 64 MB, each below 50 MB, with at most 60 files
+  and four queued media attachments. Host transport and tmpfs limits now match
+  those file limits; large bytes are not included in model tool receipts.
+- `set_work_plan(brief)` lets the agent revise its own temporary technical brief
+  and add necessary subtasks, package checks, tests or repairs. It cannot alter
+  your default prompt, grant permissions, or authorize unrelated memory changes.
+
+After pulling this update, **rebuild the sandbox image**. Run
+`python scripts/check_sandbox.py --web` to check real PNG and MP4 production plus
+public web/browser access. No AI/Telegram credits are used by that check.
+
 ### Enable your agent
 
 Agent mode is for **active bot premium subscriptions**, not Telegram Premium.
@@ -93,7 +136,7 @@ user, credentials, Docker flags, host files or unrestricted networking.
   The same management actions work with `/agents`. `/skills cancel` exits upload mode.
 - Max 20 installed resources per user; 2 MB packed/unpacked per bundle, 100 archive
   entries, 512 KB per archive file, 24,000 characters per instruction body.
-  Selected task workspace: 60 files / 8 MB. ZIP traversal, links, hidden files,
+  Selected task workspace: 60 files / 64 MB. ZIP traversal, links, hidden files,
   duplicate entries and special files are rejected. Uploads never execute on install.
 
 This implements the portable instruction/resource pattern, not every vendor's
@@ -164,7 +207,7 @@ a hard process/server crash may leave an empty internal network to remove later.
 
 Normal Python/shell calls remain offline unless `network=true` is requested.
 Network workers get 768 MB RAM, 256 PIDs and 128 MB temporary storage to support
-Chromium; offline workers and proxy sidecars retain 256 MB/64 PIDs. Both have one
+Chromium; offline workers and proxy sidecars use 512 MB/128 PIDs. Both have one
 CPU, a read-only root, non-root user, no capabilities and no published ports.
 `requests`, BeautifulSoup, Playwright and system Chromium are included after the
 image is rebuilt. Chromium runs with its inner sandbox disabled inside the
@@ -270,7 +313,7 @@ without runsc. It never falls back to host `exec`, `eval` or a host shell.
 
 Each execution uses a fresh container: no host mounts, no Docker socket, no bot
 credentials, offline by default (public proxy when explicitly requested), read-only root filesystem, all Linux capabilities dropped,
-no new privileges, UID 65534, 256 MB RAM, 1 CPU, 64 PIDs and bounded tmpfs/output.
+no new privileges, UID 65534, 512 MB RAM, 1 CPU, 128 PIDs and bounded tmpfs/output.
 The runner allows up to 25 seconds of code; the outer timeout also covers startup.
 Python stdlib, Pillow, pypdf, python-docx, openpyxl, requests, BeautifulSoup and Playwright/Chromium are included. Shell execution
 runs **inside that container**. Workspace files are explicitly copied between

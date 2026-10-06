@@ -68,6 +68,20 @@ with sync_playwright() as p:
 print('headless Chromium public HTTPS works; metadata blocked')
 '''
 
+PLOT_CODE='''import numpy as np
+import matplotlib.pyplot as plt
+import subprocess
+x=np.linspace(-6,6,400)
+y=-2*x+4
+fig,ax=plt.subplots(figsize=(6,4))
+ax.plot(x,y,'k--',label='y = -2x + 4')
+ax.fill_between(x,-10,y,where=y>=-10,alpha=.25)
+ax.set_ylim(-10,10);ax.set_title('y < -2x + 4');ax.legend();ax.grid()
+fig.savefig('plot.png',dpi=120);plt.close(fig)
+subprocess.run(['ffmpeg','-loglevel','error','-y','-f','lavfi','-i','color=c=blue:s=320x240:d=1','-c:v','libx264','-threads','2','-pix_fmt','yuv420p','clip.mp4'],check=True)
+print('plot PNG and real MP4 generated successfully')
+'''
+
 async def main():
     parser=argparse.ArgumentParser();parser.add_argument('--web',action='store_true')
     args=parser.parse_args()
@@ -76,6 +90,11 @@ async def main():
     assert result['exit_code']==0,result['stderr']
     assert base64.b64decode(result['files']['result.txt'])==b'Sandbox checks passed'
     print('PASS: non-root, read-only root, no network/credentials, file output works.')
+    result=await sandbox.execute(PLOT_CODE,{})
+    assert result['exit_code']==0,result['stderr']
+    assert base64.b64decode(result['files']['plot.png']).startswith(b'\x89PNG')
+    assert base64.b64decode(result['files']['clip.mp4'])[4:8]==b'ftyp'
+    print('PASS: Python plotted a graph and FFmpeg created an MP4.')
     if args.web:
         result=await sandbox.execute(WEB_CODE,{},network=True)
         assert result['exit_code']==0,result['stderr']
