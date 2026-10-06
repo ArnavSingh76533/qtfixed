@@ -58,6 +58,7 @@ async def download(url):return await asyncio.wait_for(asyncio.to_thread(download
 
 async def deliver(message,items):
     for item in items:
+        if item.get('delivered'):continue
         data=BytesIO(item['data']);data.name=item['path'].rsplit('/',1)[-1]
         args={'caption':item['caption'][:900],'parse_mode':None}
         try:
@@ -68,6 +69,7 @@ async def deliver(message,items):
             data.seek(0)
             await message.reply_document(data,filename=data.name,**args)
         item['delivered']=True
+        item.pop('data',None)
 
 async def cache(context,owner,items):
     import main
@@ -87,5 +89,6 @@ async def cache(context,owner,items):
             kind=item['kind'];item['file_id']=sent.photo[-1].file_id if kind=='photo' else getattr(sent,kind).file_id
             try:await context.bot.delete_message(chat_id=target,message_id=sent.message_id)
             except TelegramError:pass
+        item.pop('data',None)
         kind=item['kind'];pages.append({'blocks':[{'type':kind,kind:{'type':kind,'media':item['file_id']}}]})
     return pages

@@ -32,10 +32,12 @@ async def settings(update,context,edit=False):
     owner=update.effective_user.id;prefs=store(context).prefs(owner)
     keyboard=InlineKeyboardMarkup([
         [InlineKeyboardButton('Agent mode: '+('ON' if prefs['enabled'] else 'OFF'),callback_data='personal:toggle')],
+        [InlineKeyboardButton('Every request: '+('ON' if prefs['always_on'] else 'OFF'),callback_data='personal:always')],
+        [InlineKeyboardButton('Owner instructions: '+('inherit' if prefs['inherit_defaults'] else 'personal only'),callback_data='personal:inherit')],
         [InlineKeyboardButton('Upload skill',callback_data='personal:skill'),InlineKeyboardButton('Upload agent',callback_data='personal:agent')],
         [InlineKeyboardButton('My skills / agents',callback_data='personal:list')],
         [InlineKeyboardButton('Memory',callback_data='personal:memory'),InlineKeyboardButton('Reminders',callback_data='personal:reminders')]])
-    text=('Your premium agent\n\n'+('Enabled' if prefs['enabled'] else 'Disabled')+' for requests starting with “agent” in bot DM, groups, inline and guest replies. '
+    text=('Your premium agent\n\n'+('Enabled' if prefs['enabled'] else 'Disabled')+' in bot DM, groups, inline and guest replies. /agent on uses it for every request; /agent off disables it. /agent auto uses only requests starting with “agent”. '
         'Your choice affects only you; the owner still controls Inline/Guest availability and web access.\n'
         'Timezone: '+prefs['timezone']+' (/timezone to change)\n'
         'Tools: research, calculation, files, memory and reminders. '
@@ -61,9 +63,13 @@ async def callback(update,context):
             from request_queue import cancel
             await cancel(context,owner)
         return await settings(update,context,edit=True)
+    if action in ('always','inherit'):
+        field='always_on' if action=='always' else 'inherit_defaults'
+        current=store(context).prefs(owner);store(context).set_pref(owner,**{field:not current[field]})
+        return await settings(update,context,edit=True)
     if action in ('skill','agent'):return await request_upload(update,context,action)
     if action=='list':
-        rows=store(context).bundles(owner)
+        rows=store(context).effective_bundles(owner)
         return await update.effective_message.reply_text('\n'.join(f'{r["kind"]}: {r["name"]} · '+('ON' if r['enabled'] else 'OFF') for r in rows) or 'No skills or agents installed. Use Upload skill/agent.')
     if action=='memory':context.args=[];return await memory_command(update,context)
     if action=='reminders':context.args=[];return await reminders_command(update,context)
@@ -75,6 +81,12 @@ async def request_upload(update,context,kind):
 async def bundle_command(update,context,kind):
     if not await allowed(update,context):return
     args=context.args or [];owner=update.effective_user.id
+    if len(args)==2 and args[0]=='default':
+        import main
+        if not main.is_admin(update):return await update.effective_message.reply_text('Bot owner only.')
+        try:store(context).set_default(owner,kind,None if args[1]=='clear' else args[1])
+        except ValueError as error:return await update.effective_message.reply_text(str(error))
+        return await update.effective_message.reply_text('Owner default saved. Premium users inherit it unless they install a personal resource of this kind or disable inheritance.')
     if args and args[0]=='cancel':
         context.application.bot_data.setdefault('agent_uploads',{}).pop(owner,None)
         return await update.effective_message.reply_text('Upload mode cancelled.')
@@ -88,7 +100,7 @@ async def bundle_command(update,context,kind):
         rows=store(context).bundles(owner,kind)
         label='/skills' if kind=='skill' else '/agents'
         text='\n'.join(f'{r["name"]} · '+('ON' if r['enabled'] else 'OFF') for r in rows) or 'None installed.'
-        return await update.effective_message.reply_text(text+f'\n\n{label} add — upload/forward a file or ZIP\n{label} enable NAME\n{label} disable NAME\n{label} remove NAME\nThese are personal premium resources, not a global system prompt.')
+        return await update.effective_message.reply_text(text+f'\n\n{label} add — upload/forward a file or ZIP\n{label} enable NAME\n{label} disable NAME\n{label} remove NAME\nPersonal resources override owner defaults of the same kind. Owner: {label} default NAME or {label} default clear.')
     if args==['add']:return await request_upload(update,context,kind)
     await update.effective_message.reply_text('Use '+('/skills' if kind=='skill' else '/agents')+' add, list, enable NAME, disable NAME, or remove NAME.')
 
@@ -118,7 +130,9 @@ async def document_handler(update,context):
                 raw=LimitedBuffer();await download_into(file,raw)
                 bundle=await asyncio.to_thread(parse_bundle,raw.getvalue(),doc.file_name or 'my-agent',kind)
                 if not premium(owner):return
-                store(context).install(owner,kind,bundle);pending.pop(owner,None)
+                store(context).install(owner,kind,bundle)
+                if main.is_admin(update):store(context).set_default(owner,kind,bundle['name'])
+                pending.pop(owner,None)
                 await message.reply_text(f'Installed your {kind}: {bundle["name"]}. Turn Agent mode ON in /settings to use it. Scripts only run inside the configured sandbox.')
             except (ValueError,ProviderError) as error:await message.reply_text(str(error))
         from request_queue import submit
@@ -181,3 +195,15 @@ async def status_command(update,context):
         await update.effective_message.reply_text(path+'\n'+url)
     if not links and store(context).artifacts(owner,row['id']):
         await update.effective_message.reply_text('These download links have expired or the bot restarted. Run the task again to recreate the files.')
+
+async def agent_command(update,context):
+    if not await allowed(update,context):return
+    args=context.args or []
+    if args not in (['on'],['off'],['auto']):
+        return await update.effective_message.reply_text('/agent on — every request uses your premium agent\n/agent off — disable\n/agent auto — only “agent …” requests')
+    owner=update.effective_user.id;mode=args[0]
+    store(context).set_pref(owner,enabled=mode!='off',always_on=mode=='on')
+    if mode=='off':
+        from request_queue import cancel
+        await cancel(context,owner)
+    await settings(update,context)

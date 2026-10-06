@@ -40,6 +40,8 @@ def create_reminder(store,owner,text,when=None,cron=None,tz=None,now=None):
 
 async def tick(application,now=None):
     import primo
+    from agent_tools import cleanup_artifacts
+    cleanup_artifacts(application)
     store=application.bot_data['agent_store'];provided_now=now is not None;now=time.time() if now is None else now
     for job in store.due(now):
         if not store.claim(job['id']):continue

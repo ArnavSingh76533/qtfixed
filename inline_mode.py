@@ -149,9 +149,9 @@ async def generate_inline(context,inline_id,token,item,user):
             recovery=context.application.bot_data.get('agent_store')
             if recovery:recovery.save_answer(item['owner'],'external-last',response)
             runtime=agent_state.get('runtime')
-            if runtime and runtime.media:
+            if runtime and (runtime.media or runtime.documents):
                 from agent_media import cache
-                try:item['pages']=await cache(context,item['owner'],runtime.media)+item['pages']
+                try:item['pages']=await cache(context,item['owner'],runtime.media+[d for d in runtime.documents if d['path'] not in {m['path'] for m in runtime.media}])+item['pages']
                 except ProviderError as error:
                     response+='\n\n'+str(error)
                     item['pages']+=list(formatted_chunks(str(error)))

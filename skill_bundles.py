@@ -31,7 +31,7 @@ def parse_bundle(raw,filename,kind):
                     raise ValueError('Links and special files are not accepted.')
                 if item.is_dir():continue
                 total+=item.file_size
-                if total>MAX_BUNDLE or item.file_size>512*1024:raise ValueError('Unpacked bundle exceeds size limits.')
+                if total>MAX_BUNDLE or (item.file_size>512*1024 and PurePosixPath(name).name.lower() not in ('skill.md','agent.md','agents.md')):raise ValueError('Unpacked bundle exceeds size limits.')
                 if name in files:raise ValueError('Duplicate archive filename.')
                 files[name]=archive.read(item)
         expected='skill.md' if kind=='skill' else 'agent.md'
@@ -46,7 +46,7 @@ def parse_bundle(raw,filename,kind):
         entry='SKILL.md' if kind=='skill' else 'AGENT.md';files={entry:raw}
     try:text=files[entry].decode('utf-8-sig')
     except UnicodeDecodeError:raise ValueError('Instructions must be UTF-8 text.') from None
-    if '\x00' in text or not text.strip() or len(text)>24000:raise ValueError('Instructions must be non-empty text under 24,000 characters.')
+    if '\x00' in text or not text.strip():raise ValueError('Instructions must be non-empty UTF-8 text.')
     metadata={};body=text
     if text.startswith('---\n') or text.startswith('---\r\n'):
         parts=re.split(r'^---\s*$',text,maxsplit=2,flags=re.M)

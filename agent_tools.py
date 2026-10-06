@@ -33,6 +33,10 @@ TOOLS=[
     spec('shell','Run shell only in the isolated container workspace. Set network=true for proxy-aware public HTTP/HTTPS. No host access. Optional packages installs supported PyPI dependencies in this temporary container; use network=true.',{'command':'string','network':'boolean','packages':'string'},['command']),
     spec('fetch_url','Fetch the actual live HTML/JSON/text at a public URL, save the raw body to path, and return readable text, links, status and timestamp. Read the saved file in sections for scripts/embedded data. No browser JavaScript execution.',{'url':'string','path':'string'},['url','path']),
     spec('browse_url','Render a public web page with sandboxed headless Chromium when fetch_url lacks JavaScript-generated content. Save rendered HTML to path and return visible text, links, HTTP status and timestamp. No logins or CAPTCHA bypass.',{'url':'string','path':'string'},['url','path']),
+    spec('inspect_page','Test a workspace HTML file in Chromium. actions is a JSON array of click/fill/press/wait/expect_text/expect_visible with selector and value. Save screenshot_path; return checks and JS errors. Use network=true for CDNs such as Three.js.',{'path':'string','screenshot_path':'string','actions':'string','network':'boolean'},['path','screenshot_path']),
+    spec('create_pdf','Create and verify a real PDF from workspace HTML, including local images. Use network=true for remote images. Queues the PDF for this chat.',{'html_path':'string','path':'string','network':'boolean'},['html_path','path']),
+    spec('search_images','Find actual original image URLs using Google, then Bing if needed. Optional source_domain restricts results, e.g. pinterest.com. Download selected result and send_media or embed local downloaded image in PDF.',{'query':'string','source_domain':'string'},['query']),
+    spec('download_video','Download a public video page with installed yt-dlp, Node JS solver and FFmpeg. Tries two formats under 50 MB, stores actual file; call send_media. No cookies/logins/DRM bypass.',{'url':'string','path':'string'},['url','path']),
     spec('web_search','Search current facts; synthesize returned evidence with sources.',{'query':'string'},['query']),
     spec('generate_image','Generate requested images and embed them in this chat after completion.',{'prompt':'string'},['prompt']),
     spec('download_media','Download a public image or direct MP4/WebM URL under 50 MB into the task workspace; respects global Web. Use send_media afterwards.',{'url':'string','path':'string'},['url','path']),
@@ -65,6 +69,12 @@ def calculate(expression):
         if isinstance(value,complex) or abs(value)>1e100 or not math.isfinite(value):raise ValueError('Result outside supported range.')
         return value
     return visit(tree.body)
+
+def cleanup_artifacts(application,now=None):
+    now=time.monotonic() if now is None else now
+    cache=application.bot_data.get('agent_artifacts',{})
+    for key in list(cache):
+        if now-cache[key]['created']>3600:cache.pop(key,None)
 
 def artifact(context,owner,path,data):
     cache=context.application.bot_data.setdefault('agent_artifacts',{})
@@ -114,7 +124,7 @@ class ToolRuntime:
         self.context,self.owner,self.user,self.scope=context,owner,user,scope
         self.request,self.settings=request,settings
         self.store=context.application.bot_data['agent_store']
-        self.files={};self.exports={};self.exported_content={};self.images=[];self.media=[];self.working_brief="";self.calls=0;self.run_id=None
+        self.files={};self.exports={};self.exported_content={};self.images=[];self.media=[];self.documents=[];self.working_brief="";self.calls=0;self.run_id=None
     def export(self,path,raw):
         if self.exported_content.get(path)!=self.files[path]:
             self.exports[path]=artifact(self.context,self.owner,path,raw)
@@ -125,10 +135,10 @@ class ToolRuntime:
         return {'download':self.exports[path]}
     def registry(self):
         disabled=set()
-        if not self.settings['web']:disabled.update(('web_search','fetch_url','browse_url','download_media'))
+        if not self.settings['web']:disabled.update(('web_search','fetch_url','browse_url','download_media','search_images','download_video'))
         if not available():disabled.add('generate_image')
-        if not config.SANDBOX_ENABLED:disabled.update(('python','shell'))
-        if not config.SANDBOX_ENABLED or not config.SANDBOX_WEB_ENABLED:disabled.add('browse_url')
+        if not config.SANDBOX_ENABLED:disabled.update(('python','shell','inspect_page','create_pdf','download_video','search_images'))
+        if not config.SANDBOX_ENABLED or not config.SANDBOX_WEB_ENABLED:disabled.update(('browse_url','search_images','download_video'))
         return [s for s in TOOLS if s['function']['name'] not in disabled]
     def check_access(self):
         import primo
@@ -169,7 +179,7 @@ class ToolRuntime:
         if name=='calculator':return {'result':calculate(args['expression'])}
         if name=='current_time':return {'utc':dt.datetime.now(dt.timezone.utc).isoformat(),'timezone':self.store.prefs(self.owner)['timezone']}
         if name=='list_files':return {'files':list(self.files)}
-        if name=='list_resources':return {'resources':[{'kind':b['kind'],'name':b['name'],'description':b['description'],'enabled':bool(b['enabled'])} for b in self.store.bundles(self.owner)]}
+        if name=='list_resources':return {'resources':[{'kind':b['kind'],'name':b['name'],'description':b['description'],'enabled':bool(b['enabled'])} for b in self.store.effective_bundles(self.owner)]}
         if name in ('read_file','write_file','export_file'):
             path=safe_path(args['path'])
             if name=='write_file':
@@ -179,38 +189,53 @@ class ToolRuntime:
             if path not in self.files:raise ValueError('File does not exist in this task.')
             raw=base64.b64decode(self.files[path])
             if name=='export_file':
-                return self.export(path,raw)
+                receipt=self.export(path,raw)
+                if not any(i['path']==path for i in self.documents) and not any(i['path']==path for i in self.media):
+                    self.documents.append({'path':path,'data':raw,'kind':'document','caption':path})
+                return {**receipt,'queued_document':path}
             start=max(0,args.get('offset',0));text=raw.decode('utf-8')
             return {'content':text[start:start+14000],'total_characters':len(text),'next_offset':start+14000 if start+14000<len(text) else None}
-        if name=='browse_url':
+        if name in ('browse_url','inspect_page','create_pdf','search_images','download_video'):
+            from agent_jobs import browser_job,video_job,image_search_job
             from public_web import web_url
-            web_url(args['url']);path=safe_path(args['path'])
-            code='''import json, os, datetime
-from pathlib import Path
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,timeout=10000,
-        args=['--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--renderer-process-limit=2','--proxy-bypass-list=<-loopback>'],
-        proxy={'server':os.environ['HTTPS_PROXY']})
-    page=browser.new_page()
-    response=page.goto(URL,wait_until='domcontentloaded',timeout=15000)
-    page.wait_for_timeout(1200)
-    html=page.content()
-    if len(html.encode())>2*1024*1024:raise ValueError('Rendered HTML exceeds 2 MB')
-    output=Path(OUTPUT);output.parent.mkdir(parents=True,exist_ok=True);output.write_text(html)
-    print(json.dumps({'url':page.url,'status':response.status if response else None,
-        'title':page.title(),'text':page.locator('body').inner_text(timeout=2000)[:8000],
-        'links':page.locator('a[href]').evaluate_all('(nodes)=>nodes.slice(0,40).map(n=>n.href)'),
-        'fetched_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'note':'Rendered live page; challenge/403 responses are not successful task evidence.'}))
-    browser.close()
-'''
-            code='URL='+repr(args['url'])+'\nOUTPUT='+repr(path)+'\n'+code
-            result=await self.context.application.bot_data['sandbox'].execute(code,self.files,'python',network=True)
+            network=name in ('browse_url','search_images','download_video') or args.get('network',False)
+            if network and not self.settings['web']:raise ValueError('The owner disabled web access.')
+            if name=='download_video':
+                web_url(args['url']);path=safe_path(args['path'])
+                if not path.lower().endswith(('.mp4','.webm')):raise ValueError('Use an MP4/WebM output filename.')
+                code=video_job(args['url'],path)
+            elif name=='search_images':
+                query=args['query'].strip()[:1000];domain=args.get('source_domain','').lower().strip()
+                if not query or (domain and not re.fullmatch(r'[a-z0-9]+(?:[.-][a-z0-9]+)*\.[a-z]{2,}',domain)):raise ValueError('Provide a query and optional public source domain.')
+                code=image_search_job(query,domain);path=None
+            elif name=='browse_url':
+                web_url(args['url']);path=safe_path(args['path']);code=browser_job(args['url'],path)
+            else:
+                source=safe_path(args['html_path'] if name=='create_pdf' else args['path'])
+                if source not in self.files:raise ValueError('Write the HTML file before browser testing or PDF creation.')
+                path=safe_path(args['path']) if name=='create_pdf' else safe_path(args['screenshot_path'])
+                actions=json.loads(args.get('actions','[]'))
+                if not isinstance(actions,list) or len(actions)>30 or any(not isinstance(a,dict) for a in actions):raise ValueError('Browser actions must be a JSON array of up to 30 objects.')
+                if name=='create_pdf' and not path.lower().endswith('.pdf'):raise ValueError('Use a .pdf output filename.')
+                if name=='inspect_page' and not path.lower().endswith('.png'):raise ValueError('Screenshot must have a .png filename.')
+                code=browser_job('file:///workspace/'+source,path if name=='create_pdf' else 'rendered-'+source,
+                    screenshot=path if name=='inspect_page' else None,actions=actions,pdf=name=='create_pdf')
+            result=await self.context.application.bot_data['sandbox'].execute(code,self.files,'python',network=network)
             self.files=result.pop('files')
-            if result['exit_code']!=0:return {**result,'error':'Browser rendering failed. Inspect stderr or use fetch_url; do not claim success.'}
+            if result['exit_code']!=0:return {**result,'error':'Tool execution failed. Inspect stderr; repair or try another available method. No successful result was verified.'}
             try:receipt=json.loads(result['stdout'])
-            except ValueError:raise ValueError('Browser result was unreadable. Use fetch_url or inspect the saved HTML.') from None
+            except ValueError:raise ValueError('Tool result was unreadable. Inspect saved files and retest.') from None
+            if name=='create_pdf':
+                if path not in self.files:raise ValueError('The PDF file was not returned by the sandbox.')
+                raw=base64.b64decode(self.files[path])
+                if not raw.startswith(b'%PDF-'):raise ValueError('Output was not a PDF.')
+                exported=self.export(path,raw)
+                if not any(d['path']==path for d in self.documents):self.documents.append({'path':path,'data':raw,'kind':'document','caption':path})
+                receipt.update(exported,queued_document=path)
+            if name=='inspect_page' and receipt.get('page_errors'):
+                receipt['error']='Browser reported JavaScript errors. Fix and retest before claiming the app works.'
+            if name=='search_images' and not receipt.get('images'):
+                receipt['error']='No original images found. Try browse_url on the requested source, inspect its images/embedded HTML, or ask for a specific public pin URL.'
             return {**receipt,'saved':path,'untrusted_content':True}
         if name=='fetch_url':
             from agent_web import fetch

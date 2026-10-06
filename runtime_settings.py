@@ -16,6 +16,10 @@ def initialize(application):
         if saved.get(key) in values: settings[key] = saved[key]
     for key in ('streaming','web'):
         if isinstance(saved.get(key), bool): settings[key] = saved[key]
+    if isinstance(saved.get('model'),str) and saved['model'].strip():
+        settings['model']=saved['model']
+        groq=application.bot_data.get('groq')
+        if groq:groq.model=saved['model']
     application.bot_data['global_settings'] = settings
 
 def save_settings(context, settings):

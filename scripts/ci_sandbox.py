@@ -51,6 +51,48 @@ async def main():
     assert 'x**2 + 2*x + 1' in result['stdout']
     assert result['packages']==['sympy==1.14.0']
     print('Temporary PyPI install and code execution passed through public proxy.')
+    from agent_jobs import browser_job,video_job
+    setup="""import requests
+from pathlib import Path
+url='https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js'
+r=requests.get(url,timeout=12);r.raise_for_status();Path('three.js').write_bytes(r.content)
+html=\"\"\"<!doctype html><meta charset='utf-8'><title>Calculator test</title>
+<script src='three.js'></script><canvas id='scene'></canvas>
+<input id='a' value='4'><input id='b' value='5'><button id='sum'>Add</button><output id='result'></output>
+<script>const renderer=new THREE.WebGLRenderer({canvas:document.querySelector('#scene')});renderer.setSize(500,300);
+const scene=new THREE.Scene();scene.background=new THREE.Color('#19344e');
+const camera=new THREE.PerspectiveCamera(60,5/3,.1,100);camera.position.z=3;
+const cube=new THREE.Mesh(new THREE.BoxGeometry(),new THREE.MeshNormalMaterial());scene.add(cube);
+function animate(){requestAnimationFrame(animate);cube.rotation.y+=.01;renderer.render(scene,camera)}animate();
+document.querySelector('#sum').onclick=()=>document.querySelector('#result').textContent=String(Number(document.querySelector('#a').value)+Number(document.querySelector('#b').value));
+</script>\"\"\"
+Path('calculator.html').write_text(html)
+"""
+    result=await sandbox.execute(setup,{},network=True)
+    assert result['exit_code']==0,result['stderr']
+    files=result['files']
+    actions=[{'action':'fill','selector':'#a','value':'7'},{'action':'fill','selector':'#b','value':'8'},
+        {'action':'click','selector':'#sum'},{'action':'expect_text','selector':'#result','value':'15'}]
+    result=await sandbox.execute(browser_job('file:///workspace/calculator.html','rendered.html',screenshot='calculator.png',actions=actions),files)
+    assert result['exit_code']==0,result['stderr']
+    receipt=json.loads(result['stdout'])
+    assert not receipt['page_errors'],receipt
+    assert len(receipt['checks'])==4,receipt
+    assert base64.b64decode(result['files']['calculator.png']).startswith(b'\x89PNG')
+    print('Real Three.js software WebGL calculator interactions and screenshot passed.')
+    files=result['files']
+    result=await sandbox.execute(browser_job('file:///workspace/calculator.html','calculator.pdf',pdf=True),files)
+    assert result['exit_code']==0,result['stderr']
+    assert json.loads(result['stdout'])['pdf_pages']>=1
+    assert base64.b64decode(result['files']['calculator.pdf']).startswith(b'%PDF-')
+    print('Actual HTML-to-PDF rendering and PDF inspection passed.')
+    result=await sandbox.execute("import subprocess,yt_dlp,yt_dlp_ejs;print(subprocess.check_output(['node','--version']).decode().strip());print(yt_dlp.version.__version__)",{})
+    assert result['exit_code']==0,result['stderr']
+    assert 'v22.' in result['stdout'],result
+    result=await sandbox.execute(video_job('https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4','download.mp4'),{},network=True)
+    assert result['exit_code']==0,result['stderr']
+    assert base64.b64decode(result['files']['download.mp4'])[4:8]==b'ftyp'
+    print('Bundled Node/EJS and real public yt-dlp video download passed.')
     result=await sandbox.execute(WEB_CODE,{},network=True)
     assert result['exit_code']==0,result['stderr']
     print('Web container smoke passed: '+result['stdout'].strip())

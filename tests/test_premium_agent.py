@@ -116,7 +116,7 @@ class PermissionTests(AgentTestBase):
         with patch.object(config,'BOT_TOKEN','123456:offline-test'):
             app=main.build_application()
         commands=set().union(*(getattr(h,'commands',set()) for h in app.handlers[0]))
-        self.assertNotIn('agent',commands);self.assertIn('agents',commands)
+        self.assertIn('agent',commands);self.assertIn('agents',commands)
 
     async def test_expiry_stops_tools_and_scope_prevents_private_memory_leak(self):
         self.store.remember(123,'dm','private','secret preference')

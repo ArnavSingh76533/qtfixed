@@ -288,9 +288,10 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
         runtime=agent_state.get('runtime')
         if runtime and runtime.images:
             await deliver_images(update.effective_message,runtime.images,original_prompt,context=context,owner=update.effective_user.id)
-        if runtime and runtime.media:
+        if runtime and (runtime.media or runtime.documents):
             from agent_media import deliver
-            await deliver(update.effective_message,runtime.media)
+            media_paths={i['path'] for i in runtime.media}
+            await deliver(update.effective_message,runtime.media+[d for d in runtime.documents if d['path'] not in media_paths])
         # No await between the successful delivery and state update.
         normalize_user(user)
         if not quota_exempt:charge_request(user)
@@ -493,6 +494,7 @@ async def settings_command(update, context, edit=False):
         [InlineKeyboardButton(('✓ ' if settings['mode']==mode else '')+mode.title(),callback_data='admin:mode:'+mode)
          for mode in ('inline','guest','off')],
         [InlineKeyboardButton('Web search: '+('ON' if settings['web'] else 'OFF'),callback_data='admin:web:toggle')],
+        [InlineKeyboardButton('Models',callback_data='admin:models:0')],
         [InlineKeyboardButton('My premium agent',callback_data='personal:settings')],
         [InlineKeyboardButton('Streaming: '+('ON' if settings['streaming'] else 'OFF'),callback_data='admin:stream:toggle')],
         [InlineKeyboardButton('Answer style: '+settings['style'],callback_data='admin:style:next')],
@@ -516,6 +518,18 @@ async def admin_callback(update,context):
         await query.answer('Admin only.',show_alert=True);return
     _,action,value=query.data.split(':')
     settings=get_settings(context)
+    if action=='models':
+        await query.answer();return await show_models(update,context,int(value) if value.isdigit() else 0)
+    if action=='model':
+        models=context.application.bot_data.get('model_picker',[])
+        if not value.isdigit() or int(value)>=len(models):return await query.answer('Reopen Models to refresh.',show_alert=True)
+        model=models[int(value)]
+        try:
+            await context.application.bot_data['groq'].probe_model(model)
+        except ProviderError as error:return await query.answer(str(error)[:180],show_alert=True)
+        settings['model']=model;save_settings(context,settings)
+        context.application.bot_data['groq'].model=model
+        await query.answer('Chat/agent model saved.');return await show_models(update,context,0,refresh=False)
     if action=='mode' and value in ('inline','guest','off'):settings['mode']=value
     elif action=='web':settings['web']=not settings['web']
     elif action=='stream':settings['streaming']=not settings['streaming']
@@ -555,7 +569,28 @@ async def chat_callback(update, context):
 
 async def model_command(update, context):
     if not is_admin(update) or update.effective_chat.type!='private':return
-    await update.effective_message.reply_text(f'Model: {config.GROQ_MODEL}\nProvider: Groq\nThe admin can change GROQ_MODEL in .env.')
+    await show_models(update,context)
+
+async def show_models(update,context,page=0,refresh=True):
+    if not is_admin(update) or update.effective_chat.type!='private':return
+    groq=context.application.bot_data['groq']
+    try:
+        if refresh or 'model_picker' not in context.application.bot_data:
+            context.application.bot_data['model_picker']=await groq.list_models()
+    except ProviderError as error:return await update.effective_message.reply_text(str(error))
+    models=context.application.bot_data['model_picker'];size=8
+    page=max(0,min(page,(len(models)-1)//size));start=page*size
+    keyboard=[[InlineKeyboardButton(('✓ ' if m==groq.model else '')+m,callback_data='admin:model:'+str(i))] for i,m in enumerate(models[start:start+size],start)]
+    nav=[]
+    if page:nav.append(InlineKeyboardButton('Previous',callback_data='admin:models:'+str(page-1)))
+    if start+size<len(models):nav.append(InlineKeyboardButton('Next',callback_data='admin:models:'+str(page+1)))
+    if nav:keyboard.append(nav)
+    text='Active Groq models · admin only\nCurrent chat/agent model: '+groq.model+'\nChoose a model. A chat + local-tool probe checks compatibility before saving. Audio-only models cannot be selected for chat. Vision/search models keep their own configuration.'
+    if update.callback_query:
+        try:await update.callback_query.edit_message_text(text,reply_markup=InlineKeyboardMarkup(keyboard))
+        except BadRequest as error:
+            if 'not modified' not in str(error).lower():raise
+    else:await update.effective_message.reply_text(text,reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def health_command(update,context):
     if not is_admin(update) or not update.effective_chat or update.effective_chat.type!='private':return
@@ -631,6 +666,7 @@ async def post_init(application):
     application.bot_data['active_requests'] = {}
     application.bot_data['chat_store'] = ChatStore(DATA_DIR / 'chats.sqlite3')
     application.bot_data['groq'] = GroqClient(config.GROQ_API_KEY)
+    application.bot_data['groq'].model=application.bot_data['global_settings'].get('model',config.GROQ_MODEL)
     application.bot_data['web'] = FeloClient()
     application.bot_data['images'] = ImageClient()
     application.bot_data['broadcast_manager'] = BroadcastManager(DATA_DIR / 'campaigns.sqlite3', application.bot)
@@ -640,7 +676,7 @@ async def post_init(application):
                 ('stop','Stop reply'), ('retry','Retry latest answer'), ('image','Create an image'),
                 ('web','Search current information'), ('ocr','Read a photo'), ('groupstatus','Check group setup'),
                 ('balance','Quota and premium'), ('export','Export conversation'), ('last','Recover last generated answer'),
-                ('settings','Settings and premium agent'), ('skills','Your premium skills'),('agents','Your premium specialists'),('help','Command guide')]
+                ('agent','Agent on/off/auto'), ('settings','Settings and premium agent'), ('skills','Your premium skills'),('agents','Your premium specialists'),('help','Command guide')]
     try:
         await application.bot.set_my_commands([BotCommand(*c) for c in commands])
         await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
@@ -692,7 +728,7 @@ def build_application():
     handlers = {'start':code_downloads.start_with_code, 'help':help_command, 'image':image_generate_command, 'flux':image_generate_command, 'flux2':image_generate_command, 'ask':ask_command, 'web':web_command, 'ocr':image_command, 'groupstatus':group_status, 'stop':stop_command,
                 'retry':retry_command, 'new':reset_conversation, 'reset':reset_conversation,
                 'forget':forget_command, 'export':export_command, 'settings':settings_command,
-                'agents':agent_ui.agents_command, 'skills':agent_ui.skills_command,'memory':agent_ui.memory_command,
+                'agent':agent_ui.agent_command,'agents':agent_ui.agents_command, 'skills':agent_ui.skills_command,'memory':agent_ui.memory_command,
                 'reminders':agent_ui.reminders_command,'timezone':agent_ui.timezone_command,'agentstatus':agent_ui.status_command,
                 'last':last_answer_command,'health':health_command,'model':model_command, 'privacy':privacy_command, 'balance':balance,
                 'claim':claim_promo, 'gencharlie037':generate_promo, 'resetcount':reset_all_counts,

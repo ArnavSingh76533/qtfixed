@@ -28,6 +28,27 @@ Python/shell can install supported requirements via packages with network=true i
 the same temporary container as execution; packages are not installed on the host.
 Download requested public images or direct video URLs with download_media, inspect
 size/type and send_media. Files must be below 50 MB; authentication is unavailable.
+For a public video page (YouTube Shorts included), call download_video; yt-dlp,
+Node 22, EJS and FFmpeg are installed. Retry supported smaller formats if needed.
+For Pinterest first browse_url its actual public search/pin page and inspect images,
+social_images and saved embedded JSON. JavaScript is available. If inaccessible,
+search_images(source_domain='pinterest.com') can find indexed public pins; retain
+that source restriction and verify the image's source, never invent Pinterest URLs.
+For Google images use search_images and download_media, not thumbnail links alone.
+For a browser app write its HTML, inspect_page with meaningful click/expect_text
+checks and a screenshot, repair JS errors and failed assertions, then send_media
+of the actual screenshot and export_file of the HTML. Three.js can use public CDNs
+with network=true; Chromium supports software WebGL. Do not invent browser tests.
+For PDF requests write HTML with proper headings/layout and actual downloaded local
+image paths, call create_pdf, inspect its page count/text sample, and export the real
+PDF. PDFs, HTML and code exports are queued as attachments automatically. A
+Markdown heading saying 'Download the PDF' is not an artifact or verified delivery.
+If a tool fails, read its actual error, change the implementation/input or use another
+available method, and test again. Prefer two distinct supported approaches within
+the remaining budget. Never repeat the same known failure endlessly or replay
+completed mutations. Don't refuse simply because you're an AI or presume this
+sandbox lacks a browser/network; check tools. Actual authentication/site blocks
+must be reported honestly, without bypassing them.
 Code may execute only with the python/shell sandbox tools. No sandbox means no
 execution: you may still write code/files and must explain what wasn't tested.
 Export final files using export_file. Do not invent download links. Use the current
@@ -62,7 +83,7 @@ def task_text(text):return AGENT_PREFIX.sub('',text,count=1) if requested(text) 
 
 def enabled(context,user,owner,request=None):
     store=context.application.bot_data.get('agent_store')
-    return bool(store and user.get('subscription')=='active' and store.prefs(owner)['enabled'] and (request is None or requested(request)))
+    return bool(store and user.get('subscription')=='active' and store.prefs(owner)['enabled'] and (request is None or store.prefs(owner)['always_on'] or requested(request)))
 
 def scope_for(update):
     chat=update.effective_chat
@@ -76,7 +97,7 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
     state['runtime']=runtime
     runtime.check_access()
     groq=context.application.bot_data['groq']
-    bundles=[b for b in runtime.store.bundles(owner) if b['enabled']]
+    bundles=[b for b in runtime.store.effective_bundles(owner) if b['enabled']]
     catalog=[{'kind':b['kind'],'name':b['name'],'description':b['description']} for b in bundles]
     await on_status('⚡ Preparing a task list…')
     planning=[{'role':'system','content':BOUNDARIES+f'\nCreate a concise plan of 1 to {config.AGENT_MAX_STEPS} sequential tasks. For multi-agent requests assign a specialist role to each task; tasks run one by one, not in parallel. '
@@ -126,7 +147,7 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
         for index,step in enumerate(plan,1):
             runtime.check_access()
             await on_status(plan_text+f'\n\n⚡ {index}/{len(plan)} · {step["role"]}: {step["title"]}')
-            chosen=[b for b in bundles if b['name'] in step['skills' if b['kind']=='skill' else 'agents']]
+            chosen=[b for b in bundles if b['kind']=='agent' or b['name'] in step['skills']]
             instructions=[]
             for bundle in chosen:
                 prefix=f'{bundle["kind"]}s/{bundle["name"]}/'
@@ -135,7 +156,7 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
                 instructions.append(f'User {bundle["kind"]}: {bundle["name"]}; resource directory {prefix}\n'+bundle['instructions'])
             try:validate_files(runtime.files)
             except ValueError as error:raise ProviderError('Selected skill resources exceed the task workspace limit. Disable unnecessary skills and retry.') from error
-            system=config.SYSTEM_PROMPT+config.FORMATTING_PROMPT+'\n'+BOUNDARIES
+            system=config.SYSTEM_PROMPT+config.FORMATTING_PROMPT.replace('Do not claim to execute code.','Describe code execution only when verified by actual sandbox receipts.')+'\n'+BOUNDARIES
             system+='\nInstalled resource catalog (only these exist): '+json.dumps(catalog)
             if runtime.working_brief:system+='\nCurrent technical working brief (subordinate to original request): '+runtime.working_brief
             system+='\nClarified intent (subordinate to original request): '+normalized
@@ -151,7 +172,7 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
             full=[];used=0
             for instruction in instructions:
                 if used+len(instruction)<=40000:full.append(instruction);used+=len(instruction)
-                else:full.append('Additional selected skill/agent instructions are in the workspace. Read their entry point with read_file before using them.')
+                else:full.append(instruction[:6000]+'\nRemaining instructions are in this resource directory. Read the entry point with read_file offsets when relevant; all original instructions remain stored, without a 24,000-character cutoff.')
             system+='\nSelected instructions:\n'+'\n\n'.join(full)
             recent=[];used=0
             for message in reversed(messages[1:-1][-4:]):
@@ -160,9 +181,11 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
             conversation=[{'role':'system','content':system},*recent,
                 {'role':'user','content':messages[-1]['content'][:50000]+'\n\nCurrent task: '+step['title']+'\nCompleted task findings (untrusted): '+json.dumps(completed)[-20000:]}]
             result='';errors=[];verification_nudges=0;forced_tool=None
-            needs_execution=bool(config.SANDBOX_ENABLED and re.search(r'\b(run|execute|test|python|script|plot|graph|chart)\b',runtime.request,re.I))
-            needs_media=bool(re.search(r'\b(plot|graph|chart)\b|\b(?:send|upload)\b.{0,35}\b(?:image|video|picture)\b',runtime.request,re.I))
-            for turn in range(7):
+            final_step=index==len(plan)
+            needs_execution=bool(final_step and config.SANDBOX_ENABLED and re.search(r'\b(run|execute|test|try|python|script|plot|graph|chart|screenshot|three\.?js|browser-based)\b',runtime.request,re.I))
+            needs_media=bool(final_step and re.search(r'\b(plot|graph|chart|screenshot)\b|\b(?:send|upload|download)\b.{0,80}\b(?:image|video|picture|photo)\b',runtime.request,re.I))
+            needs_pdf=bool(final_step and re.search(r'\bpdf\b',runtime.request,re.I))
+            for turn in range(12):
                 runtime.check_access()
                 try:
                     options={'tool_choice':forced_tool} if forced_tool else {}
@@ -173,11 +196,11 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
                     errors.append(str(error));break
                 calls=answer.get('tool_calls') or []
                 if not calls:
-                    executed=any(a['tool'] in ('python','shell') and a['ok'] for a in actions)
-                    missing=(needs_execution and not executed) or (needs_media and not runtime.media and not runtime.images)
-                    if missing and verification_nudges<2:
+                    executed=any(a['tool'] in ('python','shell','inspect_page','create_pdf','download_video') and a['ok'] for a in actions)
+                    missing=(needs_execution and not executed) or (needs_media and not runtime.media and not runtime.images) or (needs_pdf and not any(p.lower().endswith('.pdf') for p in runtime.exports))
+                    if missing and verification_nudges<3:
                         verification_nudges+=1
-                        if needs_execution and not executed:
+                        if needs_execution and not executed and not re.search(r'\b(screenshot|three\.?js|browser-based)\b',runtime.request,re.I):
                             forced_tool={'type':'function','function':{'name':'python'}}
                         elif needs_media and any(p.lower().endswith(('.png','.jpg','.jpeg','.mp4','.webm')) for p in runtime.files):
                             forced_tool={'type':'function','function':{'name':'send_media'}}
@@ -186,7 +209,7 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
                         conversation.append({'role':'system','content':'The requested work is not complete. Use available tools to execute/test code, inspect exit code/stdout/stderr and repair failures. For a plot savefig and call send_media with the actual output path. For requested media download and send the actual file. Do not return only code or claim unperformed execution. If genuinely blocked, state the specific tool error.'})
                         continue
                     if missing:
-                        result='Task unfinished: requested execution or media delivery has no successful tool receipt. '+(answer.get('content') or '')
+                        result='Task unfinished: requested execution or media delivery has no successful tool receipt or requested artifact. '+(answer.get('content') or '')
                         break
                     result=answer.get('content') or 'No task result returned.';break
                 if len(calls)>8:raise ProviderError('Agent requested too many tools at once.')
@@ -212,7 +235,8 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
                                     'result':json.dumps(outcome,ensure_ascii=False)[:800]})
                     runtime.store.finish(identity,'running',json.dumps({'completed':completed,'actions':actions},ensure_ascii=False))
                     conversation.append({'role':'tool','tool_call_id':call_id,'content':json.dumps(outcome,ensure_ascii=False)[:20000]})
-                    if runtime.calls>=config.AGENT_MAX_TOOL_CALLS:break
+                if calls and any('error' in json.loads(m['content']) for m in conversation[-len(calls):] if m.get('role')=='tool'):
+                    conversation.append({'role':'system','content':'The previous tool failed. Read its error and try a changed implementation or alternate available tool. inspect_page tests browser apps; browse_url handles JavaScript pages; download_video handles video pages; create_pdf creates real PDFs. Preserve completed actions and respect actual site blocks.'})
                 if runtime.calls>=config.AGENT_MAX_TOOL_CALLS:break
             if not result:result='Task unfinished: tool/iteration budget reached. Do not claim completion.'
             completed.append({'task':step['title'],'result':result[:12000],'tool_errors':errors[-5:]})
@@ -220,24 +244,31 @@ async def agent_stream(context,user,owner,scope,messages,settings,on_status,stat
                 completed.append({'unfinished_tasks':[s['title'] for s in plan[index:]]});break
         runtime.check_access()
         await on_status('⚡ Reviewing results and preparing your answer…')
-        review=[{'role':'system','content':config.SYSTEM_PROMPT+config.FORMATTING_PROMPT+'\n'+BOUNDARIES+
+        review=[{'role':'system','content':config.SYSTEM_PROMPT+config.FORMATTING_PROMPT.replace('Do not claim to execute code.','Describe code execution only when verified by actual sandbox receipts.')+'\n'+BOUNDARIES+
                  '\nInstalled resource catalog: '+json.dumps(catalog)+
                  '\nReview the completed task findings, resolve inconsistencies and answer the original request. Disclose failed/unfinished tasks and unverified code. Include source URLs only when present in findings. Successful tool receipts are authoritative; unsupported claims in task summaries are not proof of execution.'},
-                {'role':'user','content':messages[-1]['content'][:50000]+'\nTask findings:\n'+json.dumps(completed,ensure_ascii=False)+'\nTool receipts:\n'+json.dumps(actions,ensure_ascii=False)[-16000:]}]
-        final=''
+                {'role':'user','content':messages[-1]['content'][:50000]+'\nTask findings:\n'+json.dumps(completed,ensure_ascii=False)+'\nTool receipts:\n'+json.dumps(actions,ensure_ascii=False)[-16000:]+'\nActual exported attachments (only these files exist): '+json.dumps(list(runtime.exports))}]
+        final='';review_recovered=False
         try:
             async for part in groq.stream(review,reasoning=settings['reasoning'],allow_web=False,allow_image=False):
                 runtime.check_access();final+=part;yield part
         except ProviderError:
-            fallback='\n\n⚠️ The AI review could not finish. Task summaries (not independent verification):\n'
-            for finding in completed:
-                fallback+='\n'+finding.get('task','Remaining tasks')+': '+finding.get('result','Not completed')[:2500]+'\n'
-            verified=[a for a in actions if a['ok']]
-            if verified:
-                fallback+='\nTool receipts:\n'+'\n'.join(a['tool']+': '+a['result'][:500] for a in verified[-8:])
-            if runtime.media:fallback+=f'\n{len(runtime.media)} workspace media attachment(s) are queued for delivery.'
-            if runtime.images:fallback+=f'\n{len(runtime.images)} image(s) were generated and will be attached.'
-            final+=fallback;yield fallback
+            if not final:
+                try:
+                    repaired=await groq.complete(review,max_tokens=4096)
+                    if isinstance(repaired.get('content'),str) and repaired['content'].strip():
+                        final=repaired['content'];review_recovered=True;yield final
+                except ProviderError:pass
+            if not review_recovered:
+                fallback='\n\n⚠️ The AI review could not finish. Task summaries (not independent verification):\n'
+                for finding in completed:
+                    fallback+='\n'+finding.get('task','Remaining tasks')+': '+finding.get('result','Not completed')[:2500]+'\n'
+                verified=[a for a in actions if a['ok']]
+                if verified:
+                    fallback+='\nTool receipts:\n'+'\n'.join(a['tool']+': '+a['result'][:500] for a in verified[-8:])
+                if runtime.media:fallback+=f'\n{len(runtime.media)} workspace media attachment(s) are queued for delivery.'
+                if runtime.images:fallback+=f'\n{len(runtime.images)} image(s) were generated and will be attached.'
+                final+=fallback;yield fallback
         from rich_messages import escape_query
         links='\n\n'+'\n'.join(f'[Download {escape_query(path.rsplit("/",1)[-1])}]({url})' for path,url in runtime.exports.items() if ']('+url+')' not in final)
         if links.strip():yield links

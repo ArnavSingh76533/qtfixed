@@ -18,20 +18,40 @@ class AgentStore:
         CREATE TABLE IF NOT EXISTS run_artifacts(owner INTEGER,run_id TEXT,path TEXT,token TEXT,expires REAL,PRIMARY KEY(owner,run_id,path));
         CREATE TABLE IF NOT EXISTS answers(owner INTEGER,scope TEXT,body TEXT,created REAL,PRIMARY KEY(owner,scope));
         ''')
+        columns={r[1] for r in self.db.execute('PRAGMA table_info(preferences)')}
+        if 'always_on' not in columns:self.db.execute('ALTER TABLE preferences ADD COLUMN always_on INTEGER NOT NULL DEFAULT 0')
+        if 'inherit_defaults' not in columns:self.db.execute('ALTER TABLE preferences ADD COLUMN inherit_defaults INTEGER NOT NULL DEFAULT 1')
+        self.db.execute('CREATE TABLE IF NOT EXISTS owner_defaults(kind TEXT PRIMARY KEY, source_owner INTEGER, name TEXT)')
         # A process may have died after sending a reminder but before recording it.
         self.db.execute("UPDATE schedules SET status='uncertain' WHERE status='sending'")
         self.db.execute("UPDATE runs SET status='interrupted' WHERE status='running'")
         self.db.commit()
     def close(self):self.db.close()
     def prefs(self,owner):
-        row=self.db.execute('SELECT enabled,timezone FROM preferences WHERE owner=?',(owner,)).fetchone()
-        return dict(row) if row else {'enabled':0,'timezone':'Asia/Kolkata'}
+        row=self.db.execute('SELECT enabled,timezone,always_on,inherit_defaults FROM preferences WHERE owner=?',(owner,)).fetchone()
+        return dict(row) if row else {'enabled':0,'timezone':'Asia/Kolkata','always_on':0,'inherit_defaults':1}
     def set_pref(self,owner,**values):
         current=self.prefs(owner);current.update({k:v for k,v in values.items() if k in current})
-        with self.db:self.db.execute('INSERT OR REPLACE INTO preferences VALUES (?,?,?)',(owner,int(bool(current['enabled'])),current['timezone']))
+        with self.db:self.db.execute('INSERT OR REPLACE INTO preferences(owner,enabled,timezone,always_on,inherit_defaults) VALUES (?,?,?,?,?)',(owner,int(bool(current['enabled'])),current['timezone'],int(bool(current['always_on'])),int(bool(current['inherit_defaults']))))
     def bundles(self,owner,kind=None):
         rows=self.db.execute('SELECT * FROM bundles WHERE owner=?'+(' AND kind=?' if kind else '')+' ORDER BY name',(owner,kind) if kind else (owner,))
         return [dict(r) for r in rows]
+    def set_default(self,owner,kind,name=None):
+        if name and not any(b['name']==name and b['enabled'] for b in self.bundles(owner,kind)):
+            raise ValueError('Enable/install this resource before setting it as the owner default.')
+        with self.db:
+            if name:self.db.execute('INSERT OR REPLACE INTO owner_defaults VALUES (?,?,?)',(kind,owner,name))
+            else:self.db.execute('DELETE FROM owner_defaults WHERE kind=?',(kind,))
+    def effective_bundles(self,owner):
+        personal=self.bundles(owner)
+        if not self.prefs(owner)['inherit_defaults']:return personal
+        kinds={b['kind'] for b in personal if b['enabled']}
+        defaults=[]
+        for row in self.db.execute('SELECT b.* FROM bundles b JOIN owner_defaults d ON b.owner=d.source_owner AND b.kind=d.kind AND b.name=d.name WHERE b.enabled=1'):
+            item=dict(row)
+            if item['kind'] not in kinds:
+                item['inherited']=True;defaults.append(item)
+        return personal+defaults
     def install(self,owner,kind,bundle):
         existing=self.bundles(owner)
         if len(existing)>=20 and not any(r['kind']==kind and r['name']==bundle['name'] for r in existing):raise ValueError('Maximum 20 installed skills/agents. Remove one first.')

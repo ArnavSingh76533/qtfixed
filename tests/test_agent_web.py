@@ -96,7 +96,7 @@ class WebToolTests(AgentTestBase):
         self.assertIn('rendered.html',runtime.files)
         self.assertTrue(sandbox.execute.call_args.kwargs['network'])
         code=sandbox.execute.call_args.args[0]
-        self.assertIn("URL='https://example.com'",code)
+        self.assertIn("TARGET='https://example.com'",code)
         self.assertIn("os.environ['HTTPS_PROXY']",code)
 
     async def test_nonzero_code_exit_is_explicit_failure(self):
@@ -154,7 +154,7 @@ class AgentFallbackTests(AgentTestBase):
     async def test_clarification_does_not_change_authorization_and_failed_review_keeps_file(self):
         decisions=[{'content':json.dumps({'normalized_request':'Create a verified report','assumptions':['Use a text file'],'steps':[{'title':'Create report'}]})},
             premium.PlannerTests.tool(self,'write_file',{'path':'report.txt','content':'42'},'a'),
-            premium.PlannerTests.tool(self,'export_file',{'path':'report.txt'},'b'),{'content':'Created report'}]
+            premium.PlannerTests.tool(self,'export_file',{'path':'report.txt'},'b'),{'content':'Created report'},ProviderError('Synthesis still unavailable')]
         async def stream(*args,**kwargs):
             raise ProviderError('The assistant returned an empty answer.')
             yield ''
@@ -169,7 +169,7 @@ class AgentFallbackTests(AgentTestBase):
     async def test_image_and_tool_failure_survive_a_failed_final_review(self):
         decisions=[{'content':json.dumps({'steps':[{'title':'Generate image'}]})},
             premium.PlannerTests.tool(self,'generate_image',{'prompt':'moon'},'a'),
-            ProviderError('Decision failed')]
+            ProviderError('Decision failed'),ProviderError('Synthesis still unavailable')]
         async def stream(*args,**kwargs):
             raise ProviderError('The assistant returned an empty answer.')
             yield ''

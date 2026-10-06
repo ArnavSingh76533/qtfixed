@@ -63,6 +63,46 @@
   and add necessary subtasks, package checks, tests or repairs. It cannot alter
   your default prompt, grant permissions, or authorize unrelated memory changes.
 
+Owner uploads via `/agents add` or `/skills add` automatically become the
+inherited default of that kind for premium agent users. `/agents default NAME`
+(or `/skills default NAME`) selects another enabled owner resource; `default clear`
+removes that default. A user's personal enabled resource replaces the default of
+that kind, and **Owner instructions** in personal settings disables inheritance.
+Other users' private uploads/memories remain inaccessible.
+
+Admin **/settings → Models** (also `/model`) loads Groq's live active model list
+using `/openai/v1/models`, with pagination. Selecting a model runs a small chat/
+local-tool probe before saving it to `global_settings.json`; unsupported audio
+models leave the old model unchanged. This selection changes chat/agent models;
+vision and web search retain their separate configured models. Only the admin
+sees provider/model details. Existing `.env` values and user data are untouched.
+
+Native Groq `tool_use_failed` errors first get bounded repair, then a validated
+JSON action protocol without native tool calling. Unknown tools/extra arguments/
+wrong types are rejected before executing anything. Completed mutations are not
+replayed. Interrupted final reviews retry synthesis once without rerunning tools;
+actual exports remain recoverable if synthesis is unavailable.
+
+The new `download_video` handles public video pages rather than just direct MP4
+URLs. It uses the sandbox's proxy, preinstalled yt-dlp/EJS and Node 22, with smaller
+format fallback. Pinterest JavaScript is handled by Chromium; `browse_url` now
+returns images and social metadata, and source-restricted image search is another
+route to publicly indexed pins. Login walls, CAPTCHAs, geo/IP blocks and unavailable
+YouTube formats can still prevent retrieval; the bot must report the actual block.
+No authenticated sessions or website restriction bypass is provided.
+
+`create_pdf` verifies and queues a real document; `export_file` also queues HTML,
+code and other generated files. DM/group replies attach them directly. Inline/
+guest replies use cached Telegram file IDs and rich document/media pages.
+`inspect_page` supports software WebGL for Three.js, actual interaction assertions
+and saved screenshots. Tools cannot force success on broken user/model code;
+they return errors for the agent to repair and test again within its task budget.
+
+Containers and their downloaded files are deleted in the sandbox `finally` block.
+Successful uploads release their temporary media byte buffers. Owner-scoped
+recovery bytes expire after one hour and the scheduler purges them, even if no new
+artifact is created. Telegram retains the messages you received.
+
 After pulling this update, **rebuild the sandbox image**. Run
 `python scripts/check_sandbox.py --web` to check real PNG and MP4 production plus
 public web/browser access. No AI/Telegram credits are used by that check.
@@ -72,8 +112,9 @@ public web/browser access. No AI/Telegram credits are used by that check.
 Agent mode is for **active bot premium subscriptions**, not Telegram Premium.
 It starts OFF for everyone. Open **/settings in your bot DM → Agent mode ON**.
 Then start a request with **agent**, for example `agent research this site and test a scraper`.
-This explicit prefix is required in DM, groups, inline and guest modes. Other
-messages use normal chat even when the setting is ON.
+`/agent auto` keeps that prefix requirement. `/agent on` enables the premium agent
+for every request from that user across DM/groups/inline/guest. `/agent off`
+disables it. Only your own private bot chat can change these settings.
 The owner has a **My premium agent** button inside their admin panel. The same
 personal toggle applies to your bot DM, group requests, inline requests and guest
 summons. The bot owner's global Inline/Guest mode and web switch still apply.
@@ -96,7 +137,7 @@ pauses while it is off; resume paused jobs explicitly with `/reminders resume ID
 5. **Review:** synthesize the task results, report unfinished work and stream the
    final answer. `/agentstatus` shows the latest plan and run status.
 
-Default limits: 5 planned tasks, 16 tool calls, 7 decisions per task, 900 seconds
+Default limits: 5 planned tasks, 30 tool calls (configurable up to 60), 12 decisions per task, 900 seconds
 for execution/review. Code containers have their own time and resource limits.
 A stopped/failed task can already have saved a memory, created a reminder, or
 produced a file; those completed actions are not rolled back. Inspect `/memory`,
@@ -111,7 +152,11 @@ Plans/statuses are short work summaries, not hidden model reasoning.
 | Calculator / current time | Bounded arithmetic; UTC plus your IANA timezone |
 | Workspace files | List/read/write task files; selected skill scripts and references are available |
 | Python / shell | Only in the configured isolated container; never in the bot host process |
-| File export | Complete generated files via owner-bound bot-DM download links |
+| File export | Real files attached in the current chat, plus owner-bound recovery links |
+| Browser app testing | Playwright click/fill/keyboard/assertion actions, JS error checks and screenshots |
+| PDF creation | Chromium prints workspace HTML with local/remote images; pypdf checks page count/text |
+| Image search | Google then Bing original image URLs; optional Pinterest source restriction |
+| Video download | yt-dlp + Node 22/EJS + FFmpeg, two format attempts, under 50 MB |
 | Image generation | Existing image providers and premium image entitlement; attached to the reply |
 | Memory | Explicit remember/forget requests; isolated by owner and conversation scope |
 | Reminders / cron | Persistent one-time or five-field cron **text reminders to your bot DM** |
@@ -135,13 +180,16 @@ user, credentials, Docker flags, host files or unrestricted networking.
 - `/skills list`, `/skills enable NAME`, `/skills disable NAME`, `/skills remove NAME`.
   The same management actions work with `/agents`. `/skills cancel` exits upload mode.
 - Max 20 installed resources per user; 2 MB packed/unpacked per bundle, 100 archive
-  entries, 512 KB per archive file, 24,000 characters per instruction body.
+  entries, 512 KB per resource file. Instruction entry points may use the full
+  2 MB upload budget; the old 24,000-character rejection is removed. Larger
+  instructions remain stored in full and load progressively to fit model context.
   Selected task workspace: 60 files / 64 MB. ZIP traversal, links, hidden files,
   duplicate entries and special files are rejected. Uploads never execute on install.
 
 This implements the portable instruction/resource pattern, not every vendor's
 plugin format. Network-dependent skills and tools absent from the registry cannot
-run unchanged. Only selected instructions load; resources are read on demand.
+run unchanged. Personal enabled agent instructions apply automatically; skills are selected for the task.
+Resources and long instruction sections are read on demand.
 Packages are installed by the owner in the sandbox image, never from untrusted
 skill installation hooks. Files produced in a task can be exported; links expire
 in one hour or on restart, and only the requesting user can download them.
