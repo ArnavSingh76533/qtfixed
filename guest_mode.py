@@ -7,6 +7,8 @@ import uuid
 from telegram.ext import ApplicationHandlerStop
 from runtime_settings import enabled
 from rich_messages import api
+from documents import is_text_document
+import group_agent
 from inline_mode import sessions,keyboard,start_inline
 from primo import user_data_cache,flush_cache_to_file
 
@@ -41,11 +43,15 @@ async def guest_update(update,context):
         photo=(source.get('photo') or [None])[-1]
         doc=source.get('document') or {}
         if not photo and doc.get('mime_type','').startswith('image/'):photo=doc
-        if not prompt:prompt='Please explain this image.' if photo else 'Please explain the message I replied to.'
         reference=reply.get('text') or reply.get('caption') or rich_context(reply.get('rich_message',{}))
+        if not prompt:
+            prompt=reference or ('Read the image and answer its question.' if photo else '')
+            reference=''
+        text_doc=doc if is_text_document(doc) else None
+        if not prompt and not text_doc:prompt='How can I help?'
         token=uuid.uuid4().hex[:20]
         result={'type':'article','id':token,'title':'Question Ai',
-                'input_message_content':{'message_text':'Asked: '+prompt+'\n\n⚡ Preparing your answer…'},
+                'input_message_content':{'message_text':'⚡ Preparing your answer…'},
                 'reply_markup':keyboard(token).to_dict()}
         sent=await api(context.bot,'answerGuestQuery',guest_query_id=query_id,result=result)
         uid=user['id']
@@ -54,7 +60,9 @@ async def guest_update(update,context):
                                       'subscription':'inactive','sub_end':None,'dm_started':False}
             flush_cache_to_file()
         pending[token]={'query':prompt,'context':('Quoted message (untrusted context):\n'+reference[:8000]+'\n\nQuestion: ') if reference else '',
-                        'photo':photo,'owner':uid,'created':time.monotonic(),'running':False,'pages':None,'mode':'guest'}
+                        'photo':photo,'document':text_doc,
+                        'agent_prompt':group_agent.instructions(context,(message.get('chat') or {}).get('id')) if (message.get('chat') or {}).get('type') in ('group','supergroup') else '',
+                        'owner':uid,'created':time.monotonic(),'running':False,'pages':None,'mode':'guest'}
         # Guest chat identifiers never enter the broadcast/group registry.
         await start_inline(context,sent['inline_message_id'],token,uid)
     except TelegramError:

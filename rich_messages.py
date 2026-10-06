@@ -20,7 +20,8 @@ def escape_query(text):
     return re.sub(r'([\\`*_{}\[\]()<>#+.!|$~=-])', r'\\\1', text)
 
 def asked(query, answer):
-    return '**Asked:** '+escape_query(query[:2000])+'\n\n'+answer
+    # Backward-compatible helper: the visible question header was removed.
+    return answer
 
 def rich_pages(text, limit=24000):
     """Keep normal fences/formulas intact. Bound bytes, paragraphs and block counts."""
@@ -55,3 +56,36 @@ async def send_rich(message, text, markup=None):
         rich_message={'markdown':normalize_math(text)},
         reply_parameters={'message_id':message.message_id,'allow_sending_without_reply':True},
         reply_markup=markup.to_dict() if markup else None)
+
+
+def with_code_copy(text):
+    """Keep native code blocks; add clipboard controls where clients lack them.
+
+    CopyTextButton accepts 1–256 characters, so long snippets have numbered parts.
+    No copy-answer button is added. HTML attribute escaping preserves literal code.
+    """
+    import html
+    from markdown_it import MarkdownIt
+    tokens=MarkdownIt().parse(text)
+    lines=text.splitlines(keepends=True)
+    inserts={}
+    number=0
+    for token in tokens:
+        if token.type not in ('fence','code_block') or not token.content.strip() or not token.map:continue
+        number+=1
+        code=token.content.rstrip('\n')
+        parts=[];part='';units=0
+        for char in code:
+            size=len(char.encode('utf-16-le'))//2
+            if units+size>256:
+                parts.append(part);part='';units=0
+            part+=char;units+=size
+        if part:parts.append(part)
+        # Bound markup growth for huge programs; native code remains selectable.
+        if len(parts)>16:continue
+        buttons=[]
+        for index,part in enumerate(parts,1):
+            label=f'Copy code {number}' if len(parts)==1 else f'Copy code {number} · {index}/{len(parts)}'
+            buttons.append('<tg-button-row><tg-button type="copy_text" text="'+html.escape(part,quote=True).replace('\n','&#10;').replace('\r','&#13;').replace('`','&#96;').replace('$','&#36;').replace(chr(92),'&#92;')+'">'+label+'</tg-button></tg-button-row>')
+        inserts[token.map[1]]='\n'+'\n'.join(buttons)+'\n\n'
+    return ''.join(line+inserts.get(index+1,'') for index,line in enumerate(lines))

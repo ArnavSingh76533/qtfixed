@@ -117,7 +117,15 @@ async def generate_images(context,owner,user,prompt,original_prompt=None):
     await log_prompt(context,owner,original_prompt or prompt)
     return await asyncio.wait_for(context.application.bot_data['images'].generate(prompt,image_count(user)),180)
 
-async def deliver_images(message,images,prompt):
+async def deliver_images(message,images,prompt,context=None,owner=None):
+    if context is not None:
+        from rich_messages import api
+        ids=await cache_images(context,owner,images)
+        await api(context.bot,'sendRichMessage',chat_id=message.chat_id,
+            message_thread_id=message.message_thread_id,rich_message=image_rich(ids,prompt),
+            reply_parameters={'message_id':message.message_id,'allow_sending_without_reply':True})
+        return
+    # Retained for callers that only provide a Message (never sends to another chat).
     caption='🎨 '+prompt[:850]
     if len(images)==1:
         await message.reply_photo(BytesIO(images[0]),caption=caption)
@@ -127,7 +135,10 @@ async def deliver_images(message,images,prompt):
 
 async def cache_images(context,owner,images):
     """Inline rich content requires existing Telegram file IDs, not remote URLs."""
-    target=config.IMAGE_CACHE_CHAT_ID or owner
+    import main
+    target=config.IMAGE_CACHE_CHAT_ID or main.LOG_CHANNEL_ID
+    if not target:
+        raise ProviderError('Image delivery needs an upload chat. Ask the admin to set IMAGE_CACHE_CHAT_ID to a private channel where the bot can post.')
     ids=[]
     for data in images:
         sent=await context.bot.send_photo(chat_id=target,photo=BytesIO(data),disable_notification=True)
@@ -137,7 +148,6 @@ async def cache_images(context,owner,images):
     return ids
 
 def image_rich(file_ids,prompt):
-    from rich_messages import escape_query
     media=[{'id':f'image_{i}','media':{'type':'photo','media':fid}} for i,fid in enumerate(file_ids)]
-    markdown='**Asked:** '+escape_query(prompt[:2000])+'\n\n'+'\n\n'.join(f'![](tg://photo?id=image_{i})' for i in range(len(file_ids)))
+    markdown='\n\n'.join(f'![](tg://photo?id=image_{i})' for i in range(len(file_ids)))
     return {'markdown':markdown,'media':media}

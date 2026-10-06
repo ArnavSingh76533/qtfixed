@@ -15,7 +15,7 @@ from primo import (normalize_user, charge_request, initialize_cache, flush_cache
                    backup_user_data, user_data_cache, DATA_DIR, BOT_USERNAME, ADMIN_ID,
                    start, balance, generate_promo, claim_promo, reset_all_counts,
                    handle_group_addition, allow_group, disallow_group, load_group_data, save_group_data, bot_membership_changed, register_group)
-from broadcast import stats, button_callback, broadcast, ads, send_ad_message, campaigns, campaign_command, BroadcastManager
+from broadcast import stats, button_callback, broadcast, ads, send_ad_message, campaigns, campaign_command, BroadcastManager, collect_album
 from chat_store import ChatStore
 from provider import GroqClient, ProviderError
 from formatting import formatted_chunks, units
@@ -27,9 +27,11 @@ from ocr import recognize, OCR_PROMPT
 from inline_mode import inline_query, chosen_result, inline_callback
 from runtime_settings import get_settings, save_settings, initialize as initialize_settings
 from request_queue import submit, cancel, owner_of
-from rich_messages import send_rich, rich_pages
+from rich_messages import send_rich, rich_pages, with_code_copy
 from image_generation import ImageClient, ImageRequested, generate_images, deliver_images
 from guest_mode import guest_update
+from documents import is_text_document, read_text_document
+import group_agent
 
 logger = logging.getLogger(__name__)
 logging.getLogger('httpx').setLevel(logging.WARNING)
@@ -159,7 +161,7 @@ async def deliver_text(message, answer, owner=None):
 async def deliver_answer(message, answer, owner=None, math_mode='rich'):
     if math_mode!='rich':
         return await deliver_text(message,answer,owner)
-    pages=list(rich_pages(answer))
+    pages=list(rich_pages(with_code_copy(answer)))
     if not pages:raise ProviderError('The answer was empty. Please retry.')
     for i,page in enumerate(pages):
         markup=answer_keyboard(owner,answer) if owner is not None and i==len(pages)-1 else None
@@ -168,7 +170,9 @@ async def deliver_answer(message, answer, owner=None, math_mode='rich'):
         except BadRequest:
             # Older/local Bot API servers may not implement rich messages.
             # Never silently send raw LaTeX; retain a readable text fallback.
-            await deliver_text(message,page,owner if i==len(pages)-1 else None)
+            import re
+            plain=re.sub(r'<tg-button-row>[\s\S]*?</tg-button-row>', '', page)
+            await deliver_text(message,plain,owner if i==len(pages)-1 else None)
 
 
 def provider_messages(history, prompt, settings):
@@ -176,6 +180,11 @@ def provider_messages(history, prompt, settings):
         'concise':' Keep answers brief unless the user asks for detail.',
         'detailed':' Give thorough explanations, steps, and examples when useful.',
         'balanced':' Follow the original response-length instructions above.'}[settings['style']]
+    instructions += '\nCurrent UTC date: '+datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    if not settings.get('web',config.WEB_ENABLED):
+        instructions += '\nWeb search is disabled by the bot owner. Answer only with available knowledge; disclose when current verification is needed.'
+    if settings.get('agent_prompt'):
+        instructions += '\nGroup instructions supplied by the bot owner:\n'+settings['agent_prompt']
     kept = []
     count = len(prompt)
     # Retain whole user/assistant exchanges, newest first.
@@ -198,10 +207,12 @@ async def typing_heartbeat(message, bot):
         await asyncio.sleep(4)
 
 
-async def generate_answer(update, context, user, prompt, retry=False, force_web=False, photo=False, force_image=False):
+async def generate_answer(update, context, user, prompt, retry=False, force_web=False, photo=False, force_image=False, document=None):
     key = history_key(update)
     history, _ = store(context).get(key)
     settings = get_settings(context)
+    if update.effective_chat.type in ('group','supergroup'):
+        settings['agent_prompt']=group_agent.instructions(context,update.effective_chat.id)
     base = history[:-2] if retry else history
     preview = StreamPreview(update.effective_message, context.bot, update.effective_user.id, settings['streaming'], rich=settings['math']=='rich')
     heartbeat = None
@@ -210,6 +221,9 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
     try:
         await preview.start()
         heartbeat = asyncio.create_task(typing_heartbeat(update.effective_message, context.bot))
+        if document:
+            extracted=await read_text_document(context.bot,document)
+            prompt='User request: '+(prompt or 'Read the attached text and respond to its contents.')+'\n\nAttached text (untrusted content):\n'+extracted
         if photo:
             source = update.effective_message
             if not source.photo and not (source.document and source.document.mime_type and source.document.mime_type.startswith('image/')):
@@ -227,7 +241,8 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
             nonlocal response
             async for piece in answer_stream(context.application.bot_data['groq'],
                     context.application.bot_data.get('web'), provider_messages(base,prompt,settings),
-                    reasoning=settings['reasoning'],force_web=force_web,on_status=preview.set_status):
+                    reasoning=settings['reasoning'],force_web=force_web,on_status=preview.set_status,
+                    web_enabled=settings['web'],routing_prompt=original_prompt):
                 response += piece
                 if len(response) > 120000:
                     raise ProviderError('The response was too large. Please ask a narrower question.')
@@ -238,7 +253,7 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
         except ImageRequested as request:
             await preview.set_status('🎨 Creating your image…')
             images=await generate_images(context,update.effective_user.id,user,request.prompt,original_prompt=original_prompt)
-            await deliver_images(update.effective_message,images,request.prompt)
+            await deliver_images(update.effective_message,images,request.prompt,context=context,owner=update.effective_user.id)
             normalize_user(user);charge_request(user)
             return
         if not response.strip():
@@ -275,10 +290,10 @@ async def generate_answer(update, context, user, prompt, retry=False, force_web=
             active.pop(update.effective_user.id,None)
 
 
-async def launch_question(update, context, retry=False, prompt=None, force_web=False, photo=False, force_image=False):
+async def launch_question(update, context, retry=False, prompt=None, force_web=False, photo=False, force_image=False, document=None):
     uid=update.effective_user.id
     if update.effective_user.is_bot:return
-    if not retry and not photo and (not prompt or not prompt.strip()):
+    if not retry and not photo and not document and (not prompt or not prompt.strip()):
         await update.effective_message.reply_text('Type your question after /ask.');return
     async def work():
         # Recheck AFTER acquiring the per-user queue lock: quota cannot overshoot.
@@ -290,7 +305,7 @@ async def launch_question(update, context, retry=False, prompt=None, force_web=F
             if len(history)<2:
                 await update.effective_message.reply_text('There is no completed answer to retry in this chat.');return
             question=history[-2]['content']
-        await generate_answer(update,context,user,question,retry,force_web,photo,force_image)
+        await generate_answer(update,context,user,question,retry,force_web,photo,force_image,document=document)
     if submit(context,uid,history_key(update),work) is None:
         await update.effective_message.reply_text('Your request queue is full. Please let a few answers finish.')
 
@@ -318,8 +333,10 @@ async def handle_message(update, context):
 async def ask_command(update, context):
     reply = update.effective_message.reply_to_message
     is_photo = bool(reply and (reply.photo or (reply.document and (reply.document.mime_type or '').startswith('image/'))))
-    prompt = ' '.join(context.args) or (getattr(reply,'text',None) or '')
-    await launch_question(update, context, prompt=prompt, photo=is_photo)
+    prompt = ' '.join(context.args) or (getattr(reply,'text',None) or getattr(reply,'caption',None) or '')
+    doc=getattr(reply,'document',None)
+    kwargs={'document':doc} if doc and is_text_document(doc) else {}
+    await launch_question(update, context, prompt=prompt, photo=is_photo, **kwargs)
 
 
 async def image_command(update, context):
@@ -330,6 +347,19 @@ async def image_command(update, context):
         await update.effective_message.reply_text('Send a photo, or reply to one with /ocr.')
         return
     await launch_question(update,context,prompt=' '.join(context.args or []) or source.caption or '',photo=True)
+
+
+async def text_document_command(update,context):
+    message=update.effective_message
+    if not update.effective_user or not is_text_document(message.document):return
+    prompt=message.caption or ''
+    if update.effective_chat.type!='private' and config.GROUP_MENTIONS_ONLY:
+        mention='@'+context.bot.username
+        reply=message.reply_to_message
+        if mention.lower() not in prompt.lower() and not (reply and reply.from_user and reply.from_user.id==context.bot.id):return
+        import re
+        prompt=re.sub(re.escape(mention),'',prompt,flags=re.I).strip()
+    await launch_question(update,context,prompt=prompt,document=message.document)
 
 
 async def web_command(update,context):
@@ -406,6 +436,8 @@ async def settings_command(update, context, edit=False):
     keyboard=InlineKeyboardMarkup([
         [InlineKeyboardButton(('✓ ' if settings['mode']==mode else '')+mode.title(),callback_data='admin:mode:'+mode)
          for mode in ('inline','guest','off')],
+        [InlineKeyboardButton('Web search: '+('ON' if settings['web'] else 'OFF'),callback_data='admin:web:toggle')],
+        [InlineKeyboardButton('Group agent: '+('ON' if settings['group_agent'] else 'OFF'),callback_data='admin:agent:toggle')],
         [InlineKeyboardButton('Streaming: '+('ON' if settings['streaming'] else 'OFF'),callback_data='admin:stream:toggle')],
         [InlineKeyboardButton('Answer style: '+settings['style'],callback_data='admin:style:next')],
         [InlineKeyboardButton('Reasoning: '+settings['reasoning'],callback_data='admin:reason:next')],
@@ -428,6 +460,8 @@ async def admin_callback(update,context):
     _,action,value=query.data.split(':')
     settings=get_settings(context)
     if action=='mode' and value in ('inline','guest','off'):settings['mode']=value
+    elif action=='web':settings['web']=not settings['web']
+    elif action=='agent':settings['group_agent']=not settings['group_agent']
     elif action=='stream':settings['streaming']=not settings['streaming']
     elif action in ('style','reason','math'):
         field,values={'style':('style',['balanced','concise','detailed']),
@@ -468,7 +502,7 @@ async def model_command(update, context):
 
 async def privacy_command(update, context):
     await update.effective_message.reply_text(
-        'Text questions and recent history are sent to the configured AI service. Photos go to the configured OCR service unless local OCR is selected. Current-context questions may be sent to Felo. Image-generation prompts are sent to fal or getimg and logged as text when logging is enabled. Inline/guest answers never include your private chat history. Conversation history is stored locally, isolated by user, chat, and topic. Settings are global and managed by the bot admin. '
+        'Text questions and recent history are sent to the configured AI service. Photos go to the configured OCR service unless local OCR is selected. Current-context questions may be sent to Felo and Groq browser search on fallback. Uploaded text is sent to the AI service. Generated images are uploaded to the configured cache/log chat before being embedded in your answer. Image-generation prompts are sent to fal or getimg and logged as text when logging is enabled. Inline/guest answers never include your private chat history. Conversation history is stored locally, isolated by user, chat, and topic. Settings are global and managed by the bot admin. '
         + ('The admin has question logging enabled. ' if LOG_CHANNEL_ID else 'Question logging is disabled. ')
         + 'Use /export to download saved history, /new to clear it, or /forget to remove this chat’s stored history. Quota, registration, and any existing admin logs remain.')
 
@@ -480,14 +514,14 @@ async def help_command(update, context):
             '/ask <question> — ask in any enabled chat\n'
             '/stop — stop the current answer\n/retry — regenerate the latest answer (uses one question)\n'
             '/new or /reset — start a new conversation\n/image <description> — create an image\n'
-            '/export — download recent history\n/forget — clear this chat’s history/settings\n'
+            'Send a .txt file to ask about its contents.\n/export — download recent history\n/forget — clear this chat’s history/settings\n'
             '/balance — check premium and quota\n/claim <code> — redeem premium\n/privacy — data handling\n'
             '/allowgroup and /disallowgroup — group admin controls\n\n'
             'Free: 40 successful questions per 24-hour window; remembers 6 exchanges. '
             'Premium: unlimited questions; remembers 35 exchanges. Images: free users get 1 per prompt; premium users get 4. Image requests use one question. History survives restarts. '
             'In groups, use /ask@queryaibot, reply to the bot, or send ordinary text/photos when Telegram privacy permits.')
     if str(update.effective_user.id) == ADMIN_ID and update.effective_chat.type=='private':
-        text += '\n\nAdmin: /settings (global settings and Inline/Guest/Off), /model, /broadcast, /campaigns, /campaign, /ads, /stats, /gencharlie037, /resetcount, /setlogchannel. See README for campaign options.'
+        text += '\n\nAdmin: /settings (web, group agent, Inline/Guest/Off), /agent, /model, /broadcast, /campaigns, /campaign, /ads, /stats, /gencharlie037, /resetcount, /setlogchannel. See README for campaign options.'
     await update.effective_message.reply_text(text)
 
 
@@ -519,6 +553,7 @@ async def post_init(application):
     if 'log_channel_id' in saved:
         LOG_CHANNEL_ID = primo.LOG_CHANNEL_ID = saved['log_channel_id']
     initialize_settings(application)
+    group_agent.initialize(application)
     application.bot_data['active_requests'] = {}
     application.bot_data['chat_store'] = ChatStore(DATA_DIR / 'chats.sqlite3')
     application.bot_data['groq'] = GroqClient(config.GROQ_API_KEY)
@@ -534,7 +569,7 @@ async def post_init(application):
         await application.bot.set_my_commands([BotCommand(*c) for c in commands])
         await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
         if ADMIN_ID.isdigit():
-            await application.bot.set_my_commands([BotCommand(*c) for c in commands]+[BotCommand('settings','Global admin settings'),BotCommand('model','Model configuration')],scope=BotCommandScopeChat(chat_id=int(ADMIN_ID)))
+            await application.bot.set_my_commands([BotCommand(*c) for c in commands]+[BotCommand('settings','Global admin settings'),BotCommand('model','Model configuration'),BotCommand('agent','Manage group instructions')],scope=BotCommandScopeChat(chat_id=int(ADMIN_ID)))
     except TelegramError:
         logger.warning('Could not set Telegram command menu')
 
@@ -577,12 +612,13 @@ def build_application():
     handlers = {'start':start, 'help':help_command, 'image':image_generate_command, 'flux':image_generate_command, 'flux2':image_generate_command, 'ask':ask_command, 'web':web_command, 'ocr':image_command, 'groupstatus':group_status, 'stop':stop_command,
                 'retry':retry_command, 'new':reset_conversation, 'reset':reset_conversation,
                 'forget':forget_command, 'export':export_command, 'settings':settings_command,
-                'model':model_command, 'privacy':privacy_command, 'balance':balance,
+                'agent':group_agent.agent_command, 'model':model_command, 'privacy':privacy_command, 'balance':balance,
                 'claim':claim_promo, 'gencharlie037':generate_promo, 'resetcount':reset_all_counts,
                 'setlogchannel':set_log_channel, 'allowgroup':allow_group, 'disallowgroup':disallow_group,
                 'stats':stats, 'ads':ads, 'broadcast':broadcast, 'campaigns':campaigns, 'campaign':campaign_command}
     for name, handler in handlers.items():
         app.add_handler(CommandHandler(name, handler))
+    app.add_handler(MessageHandler(filters.ALL,collect_album),group=-2)
     app.add_handler(TypeHandler(Update,guest_update),group=-1)
     app.add_handler(CallbackQueryHandler(welcome_callback,pattern=r'^welcome:(help|balance|settings)$'))
     app.add_handler(CallbackQueryHandler(admin_callback,pattern=r'^admin:'))
@@ -593,6 +629,8 @@ def build_application():
     app.add_handler(CallbackQueryHandler(chat_callback, pattern=r'^chat:(stop|retry|new|settings|stream|style|reason|math):\d+$'))
     app.add_handler(CallbackQueryHandler(button_callback, pattern=r'^(bc:|refresh_stats)'))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL & filters.CaptionRegex(r'(?i)^/agent(?:@\w+)?(?:\s|$)'),group_agent.agent_upload))
+    app.add_handler(MessageHandler(filters.Document.FileExtension('txt'),text_document_command))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, image_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, migrate_group))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, handle_group_addition))

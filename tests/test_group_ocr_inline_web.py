@@ -118,15 +118,22 @@ class WebMathTests(unittest.IsolatedAsyncioTestCase):
         await client.aclose()
 
     async def test_current_query_routes_to_web(self):
-        web=NS(search=AsyncMock(return_value='Latest result'));groq=NS(stream=None)
+        web=NS(search=AsyncMock(return_value='Verified weather evidence with current temperature and source.'))
+        async def synthesize(messages,**kwargs):
+            self.assertEqual(messages[-1]['role'],'tool');yield 'Explained result'
+        groq=NS(stream=synthesize)
         result=''.join([s async for s in answer_stream(groq,web,[{'role':'user','content':'weather today'}])])
-        self.assertEqual(result,'Latest result');web.search.assert_awaited_once()
+        self.assertEqual(result,'Explained result');web.search.assert_awaited_once()
 
     async def test_model_web_tool_call_dispatch(self):
         event={'choices':[{'delta':{'tool_calls':[{'index':0,'function':{'name':'web_search','arguments':'{"query":"latest moon launch"}'}}]},'finish_reason':'tool_calls'}]}
-        transport=httpx.MockTransport(lambda r:httpx.Response(200,text='data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n'))
+        def handle(r):
+            body=json.loads(r.content)
+            output=event if body.get('tools') else {'choices':[{'delta':{'content':'Web answer explained'},'finish_reason':'stop'}]}
+            return httpx.Response(200,text='data: '+json.dumps(output)+'\n\ndata: [DONE]\n\n')
+        transport=httpx.MockTransport(handle)
         client=GroqClient('fake',httpx.AsyncClient(transport=transport))
-        web=NS(search=AsyncMock(return_value='Web answer'))
+        web=NS(search=AsyncMock(return_value='Current agency leadership evidence including sources and dates.'))
         result=''.join([s async for s in answer_stream(client,web,[{'role':'user','content':'Who leads the agency?'}])])
         self.assertIn('Web answer',result);web.search.assert_awaited_once_with('latest moon launch')
         await client.close()

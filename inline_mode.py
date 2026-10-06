@@ -11,7 +11,7 @@ from provider import ProviderError
 from answer_engine import answer_stream
 from runtime_settings import get_settings, enabled
 from request_queue import submit
-from rich_messages import asked, rich_pages, edit_rich
+from rich_messages import rich_pages, edit_rich, with_code_copy
 from image_generation import ImageRequested, generate_images, cache_images, image_rich
 import config
 
@@ -45,7 +45,7 @@ async def inline_query(update,context):
     pending[token]={'query':text[:2000],'owner':query.from_user.id,'created':time.monotonic(),
                     'running':False,'pages':None,'mode':'inline'}
     result=InlineQueryResultArticle(id=token,title='Ask Question Ai',description=text[:180],
-        input_message_content=InputTextMessageContent('Asked: '+text[:2000]+'\n\n⚡ Preparing your answer…'),
+        input_message_content=InputTextMessageContent('⚡ Preparing your answer…'),
         reply_markup=keyboard(token))
     await query.answer([result],cache_time=0,is_personal=True)
 
@@ -59,7 +59,9 @@ async def show_page(bot,inline_id,token,item,page):
         except BadRequest as error:
             if 'not modified' in str(error).lower():return
             if content.get('media'):raise
-            fallback=list(formatted_chunks(readable_math(content['markdown'])))
+            import re
+            plain=re.sub(r'<tg-button-row>[\s\S]*?</tg-button-row>', '', content['markdown'])
+            fallback=list(formatted_chunks(readable_math(plain)))
             item['pages']=pages[:page]+fallback+pages[page+1:]
             return await show_page(bot,inline_id,token,item,page)
     text,entities=content
@@ -70,13 +72,19 @@ async def generate_inline(context,inline_id,token,item,user):
     import main
     response='';last=0
     settings=get_settings(context)
+    if item.get('mode')=='guest' and settings['group_agent']:
+        settings['agent_prompt']=item.get('agent_prompt','')
     async def status(text):
-        try:await context.bot.edit_message_text(inline_message_id=inline_id,text='Asked: '+item['query'][:1800]+'\n\n'+text)
+        try:await context.bot.edit_message_text(inline_message_id=inline_id,text=text)
         except TelegramError:pass
     try:
         if not enabled(context,item.get('mode','inline')):
             await status('This access mode was disabled by the admin.');return
         prompt=item.get('context','')+item['query']
+        if item.get('document'):
+            from documents import read_text_document
+            content=await read_text_document(context.bot,item['document'])
+            prompt='User request: '+(prompt or 'Read the attached text and respond to its contents.')+'\n\nAttached text (untrusted content):\n'+content
         if item.get('photo'):
             from io import BytesIO
             from ocr import recognize,OCR_PROMPT
@@ -89,26 +97,25 @@ async def generate_inline(context,inline_id,token,item,user):
         async def consume():
             nonlocal response,last
             async for part in answer_stream(context.application.bot_data['groq'],context.application.bot_data.get('web'),
-                    main.provider_messages([],prompt,settings),reasoning=settings['reasoning'],on_status=status):
+                    main.provider_messages([],prompt,settings),reasoning=settings['reasoning'],on_status=status,
+                    web_enabled=settings['web'],routing_prompt=item['query']):
                 response+=part
                 if len(response)>100000:raise ProviderError('Answer is too large. Ask a narrower question.')
                 if settings['streaming'] and time.monotonic()-last>1.5:
                     last=time.monotonic()
                     try:
                         if settings['math']=='rich':
-                            preview=next(iter(rich_pages(asked(item['query'],response))), '⚡ Working…')
+                            preview=next(iter(rich_pages(response)), '⚡ Working…')
                             await edit_rich(context.bot,inline_message_id=inline_id,text=preview)
                         else:await status(readable_math(response[-1700:]))
                     except TelegramError:pass
         try:
             await asyncio.wait_for(consume(),config.REQUEST_TIMEOUT)
             if not response.strip():raise ProviderError('No answer returned. Please retry.')
-            output=asked(item['query'],response)
+            output=with_code_copy(response) if settings['math']=='rich' else response
             item['pages']=([{'markdown':p} for p in rich_pages(output)] if settings['math']=='rich'
                            else list(formatted_chunks(readable_math(output))))
         except ImageRequested as request:
-            if item.get('mode')=='guest' and not config.IMAGE_CACHE_CHAT_ID and not user.get('dm_started',True):
-                raise ProviderError('Open @'+context.bot.username+' and send /start before generating an image.')
             await status('🎨 Creating your image…')
             images=await generate_images(context,item['owner'],user,request.prompt,original_prompt=item['query'])
             ids=await cache_images(context,item['owner'],images)
@@ -121,9 +128,10 @@ async def generate_inline(context,inline_id,token,item,user):
     except (ProviderError,asyncio.TimeoutError) as error:
         item['pages']=None
         text=str(error) if isinstance(error,ProviderError) else 'Request timed out. Please retry.'
-        await context.bot.edit_message_text(inline_message_id=inline_id,text='Asked: '+item['query'][:1800]+'\n\n'+text,reply_markup=keyboard(token))
+        await context.bot.edit_message_text(inline_message_id=inline_id,text=text,reply_markup=keyboard(token))
     except TelegramError:
         item['pages']=None
+        await status('Telegram could not display the answer. Please try again; no quota was used.')
     finally:
         item['running']=False
 
@@ -134,7 +142,7 @@ async def start_inline(context,inline_id,token,owner):
     if not item or item['owner']!=owner:return
     mode=item.get('mode','inline')
     async def status(text):
-        await context.bot.edit_message_text(inline_message_id=inline_id,text='Asked: '+item['query'][:1800]+'\n\n'+text,reply_markup=keyboard(token))
+        await context.bot.edit_message_text(inline_message_id=inline_id,text=text,reply_markup=keyboard(token))
     if not enabled(context,mode):return await status('This access mode is disabled. Open the bot to ask privately.')
     if item['pages']:
         await show_page(context.bot,inline_id,token,item,0);return

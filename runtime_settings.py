@@ -3,7 +3,7 @@ from storage import read_json, write_json
 import config
 
 DEFAULTS = {'mode': 'inline', 'streaming': True, 'style': 'balanced',
-            'reasoning': 'medium', 'math': 'rich'}
+            'reasoning': 'medium', 'math': 'rich', 'web': config.WEB_ENABLED, 'group_agent': True}
 
 def get_settings(context):
     return dict(DEFAULTS, **context.application.bot_data.get('global_settings', {}))
@@ -14,7 +14,8 @@ def initialize(application):
     for key, values in {'mode': ('inline','guest','off'), 'style': ('balanced','concise','detailed'),
                         'reasoning': ('low','medium','high'), 'math': ('rich','unicode')}.items():
         if saved.get(key) in values: settings[key] = saved[key]
-    if isinstance(saved.get('streaming'), bool): settings['streaming'] = saved['streaming']
+    for key in ('streaming','web','group_agent'):
+        if isinstance(saved.get(key), bool): settings[key] = saved[key]
     application.bot_data['global_settings'] = settings
 
 def save_settings(context, settings):

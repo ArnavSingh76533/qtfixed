@@ -7,11 +7,83 @@ conversations, and persistent broadcast campaigns.
 The ZIP includes the original JSON files and five user-data backups unchanged.
 The GitHub publishing helper includes source code only, never your records or keys.
 
+## October patches: deploy and use
+
+```bash
+git pull --ff-only
+python -m pip install -r requirements.txt
+```
+
+Restart your bot process. Keep your existing `DATA_DIR`, JSON files, databases and
+`.env`; this patch does not migrate or replace user/group/premium records.
+
+- **Web answers:** Felo evidence goes back to the chat model with conversation
+  context for a useful explanation. On errors, incomplete/empty results or fewer
+  than 40 characters, it tries Groq's native `browser_search` on GPT-OSS, using the
+  same `GROQ_API_KEY`. No Compound model or additional web key is required.
+  If both searches fail, the bot explicitly says it could not verify current facts
+  and does not charge quota. Only the current request triggers automatic routing;
+  a quoted web error no longer turns “Hi” or image requests into web searches.
+- **Admin web control:** `/settings` → **Web search ON/OFF**, enabled on a fresh
+  setup by default (`WEB_ENABLED` supplies the initial value). Saved admin choices
+  take precedence after restart. This applies to normal, inline, guest and `/web`
+  requests, including the backup. Already-running requests finish with their
+  captured settings. The group-agent switch is on the same admin-only panel.
+- **Text files:** send a UTF-8 `.txt`, optionally with instructions in the caption,
+  or reply to one with `/ask your question`. Guest requests also accept the text
+  attachment supplied by Telegram. Limits: 128 KB and 30,000 characters. Empty,
+  binary, oversized and invalid UTF-8 uploads receive an explanation. Files are
+  treated as input data, never executed. Inline queries cannot carry attachments.
+- **Answers only:** no “Asked:” header. Mentioning the guest bot while replying
+  without a new question passes the replied text directly, without the old
+  “Please explain the message I replied to” placeholder.
+- **Code copying:** native fenced code blocks remain. Because the Bot API has no
+  switch to force a clipboard icon inside those blocks, final rich answers also
+  include **Copy code** controls for snippets. Telegram limits each clipboard
+  button to 256 UTF-16 units; longer snippets get numbered parts (up to 16).
+  Larger programs remain selectable in their native code block. No Copy answer
+  button is restored. Client versions determine native long-press behavior.
+- **Images:** regular, group, inline and guest answers embed generated photos in
+  rich messages. Set `IMAGE_CACHE_CHAT_ID` to a private upload channel where the
+  bot can post/delete. If empty, it uses `LOG_CHANNEL_ID`; it never stages images
+  in the requester's DM. If both are empty, configure an upload chat first.
+- **Broadcast media:** reply to a photo, video, animation/GIF, audio, document or
+  formatted text with `/broadcast --user` or `/broadcast --group` (both flags may
+  be combined). Preview and Start controls remain. Native copying preserves the
+  original caption entities, including custom emoji when Telegram permits the
+  copy, without a forward label. Send/forward a full album to the bot first, then
+  reply to one item within an hour; native album grouping is preserved. Do not
+  delete the source until the campaign completes. Partial album copies become
+  uncertain deliveries, preventing automatic duplicate sends.
+
+### Group instructions from agent.md
+
+Only the configured **bot owner (`ADMIN_ID`)** can install or clear instructions;
+ordinary members and other group admins cannot change them.
+
+1. Upload `agent.md` (UTF-8, at most 16,000 characters), then reply `/agent`.
+   Alternatively, upload it with caption `/agent`.
+2. In a group, this configures that group. In the bot DM, it configures all groups.
+   Use `/agent -1001234567890` in DM to configure a particular group.
+3. `/agent [all|-group_id] status` checks the override;
+   `/agent [all|-group_id] clear` removes it. A group-specific override takes
+   precedence over the all-groups default. With neither, the original system
+   prompt is used. `/settings` → **Group agent OFF** ignores all overrides.
+
+These are conversational instructions appended to the system prompt, not a
+shell/filesystem agent. They apply to group answers and group guest summons;
+private chats and ordinary inline queries keep the original prompt. Telegram
+privacy settings and `GROUP_MENTIONS_ONLY` still determine which group messages
+are delivered/answered. Instructions persist separately in `group_agents.json`.
+
+Provider and Telegram calls are mocked in the tests; live delivery still depends
+on your deployed credentials, server/API version and bot permissions.
+
 ## Native rich messages, guest mode and image generation
 
 Update with `git pull`, install `requirements.txt`, fill the new image keys in
 `.env`, and restart. Open **/settings in the bot owner's private chat**. These
-settings apply globally: streaming, answer style, reasoning and Rich/Unicode
+settings apply globally: web search, group agent, streaming, answer style, reasoning and Rich/Unicode
 formatting. Old per-chat settings are retained on disk but no longer applied.
 Regular users cannot open settings, change them through old buttons, or use
 `/model`. Public menus and answer buttons contain no settings/model controls.
@@ -39,7 +111,7 @@ It never reads private bot history or registers the guest chat for broadcasts.
 Identified guest users get a quota record automatically; the existing channel
 membership requirement still applies to free users. Guest-only users are excluded
 from private broadcasts until they start the bot in DM. Anonymous/bot callers are
-ignored. Inline and guest answers show **Asked: original query** above the answer.
+ignored. Inline and guest messages show only the answer, without an Asked header.
 
 ### Image generation
 
@@ -63,7 +135,7 @@ Default size: **landscape 16:9**. Optional flags:
 `-l2` landscape 16:9, `-s1` square, `-s2`/`-hd` square HD.
 
 Free users receive **1 image per prompt**; the bot's active premium subscribers
-receive **4 per prompt** as an album. One successfully delivered request uses one
+receive **4 per prompt** in the rich image gallery. One successfully delivered request uses one
 question from the existing 40-question free window; there is no extra one-image-
 per-day limit. Failed requests are not charged to the bot quota (providers can
 still charge for attempted generation). The original image prompt and user ID
@@ -71,9 +143,10 @@ are logged immediately as plain text in the configured log group.
 
 Inline/guest image galleries use native rich media. Telegram requires uploaded
 file IDs for those messages: use `IMAGE_CACHE_CHAT_ID` for a private staging
-channel. Without it, images are briefly uploaded to the requesting user's DM,
-then those staging messages are deleted. New guest users must first `/start` in
-DM for this fallback. If deleting a staging message fails, it may remain there.
+channel. Without it, the configured log chat is used; requesting users never
+receive staging uploads. Staging messages are deleted after obtaining file IDs.
+If deletion fails, they may remain in the cache/log chat. The bot needs permission
+to send photos and delete its own messages in that chat.
 No live image-generation calls are made by the test suite.
 
 ### Request queue
@@ -182,9 +255,10 @@ The integration parses complete SSE events, reconnects with a fresh replay buffe
 to avoid duplicate text, and has an overall timeout. Incomplete results are labeled.
 It uses your supplied endpoint contract; Felo is an external service and can change
 or reject unauthenticated requests. No access challenges are bypassed. Web errors
-are visible and do not claim that current information was verified. Felo's answer
-is relayed with whatever links it supplies; sources are never fabricated. Questions
-routed to web are sent to Felo; this is also explained by `/privacy`.
+trigger Groq's native browser-search backup. The chat model then synthesizes the
+evidence into a response, retaining supplied URLs and dates without inventing
+missing details. If both searches fail, it reports that current information could
+not be verified. Questions routed to web go to Felo and, on fallback, Groq.
 
 ### Visual controls
 
@@ -361,8 +435,11 @@ Reply to an existing Telegram message, then send:
 /broadcast -user
 ```
 
-This copies **that single message**, preserving supported text/entities or media.
-It does not use any image AI API. Albums are not expanded automatically. Copying
+This copies the message (or its received album), preserving supported text/entities or media.
+`--user` and `--group` are also accepted.
+It does not use any image AI API. Albums received by the bot in the previous hour
+are copied together with native grouping. For an unknown album, send/forward the
+complete album first rather than broadcasting only one item. Copying
 requires access to the source message and obeys Telegram content restrictions.
 Explicit text after `--` takes priority over a replied-to message.
 
@@ -512,7 +589,7 @@ and 3.12 when the source is pushed to GitHub; local validation used Python 3.12.
 Live provider access, Telegram permissions, client rendering, and account-specific
 rate limits still require a run with your configured keys. Changing `GROQ_MODEL`
 requires a model enabled for your Groq account. Reasoning controls are sent only
-for GPT-OSS models. Felo web search, image OCR and fal/getimg image generation are included. Code execution, voice, and payments
+for GPT-OSS models. Felo web search with Groq browser-search fallback, image OCR and fal/getimg image generation are included. Code execution, voice, and payments
 are not included. Local token counting is a character budget, not an exact tokenizer.
 
 User/quota JSON persistence and history/campaign SQLite are separate stores; they

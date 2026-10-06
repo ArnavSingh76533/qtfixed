@@ -56,8 +56,7 @@ class RichTests(unittest.IsolatedAsyncioTestCase):
 
     def test_asked_query_is_literal(self):
         out=asked('**hello** $5 <b>x</b>','Answer')
-        self.assertTrue(out.startswith('**Asked:** '))
-        self.assertIn(r'\*\*hello\*\*',out);self.assertIn(r'\$5',out)
+        self.assertEqual(out,'Answer')
 
 class AdminQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_regular_user_cannot_read_or_change_global_settings(self):
@@ -95,7 +94,7 @@ class AdminQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_queued_questions_recheck_quota_before_generating(self):
         u,c=fixture();count=39;completed=[]
         async def eligible(*args):return {'subscription':'inactive'} if count<40 else None
-        async def answer(*args):
+        async def answer(*args,**kwargs):
             nonlocal count
             await asyncio.sleep(0);completed.append(args[3]);count+=1
         with patch.object(main,'eligible_user',eligible),patch.object(main,'generate_answer',answer):
@@ -150,7 +149,7 @@ class GuestTests(unittest.IsolatedAsyncioTestCase):
             await generate_inline(c,'id','token',item,{'subscription':'inactive','request_count':0})
         self.assertIn('thorough',captured[0][0][0]['content']);self.assertEqual(captured[0][1]['reasoning'],'high')
         body=c.bot._post.call_args.kwargs['data']
-        self.assertIn('**Asked:** solve',body['rich_message']['markdown']);self.assertIn('$$',body['rich_message']['markdown'])
+        self.assertNotIn('Asked:',body['rich_message']['markdown']);self.assertIn('$$',body['rich_message']['markdown'])
         charge.assert_called_once()
 
 class ImageTests(unittest.IsolatedAsyncioTestCase):
@@ -226,9 +225,10 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         u,c=fixture(False)
         with tempfile.TemporaryDirectory() as d:
             store=ChatStore(Path(d)/'chat.db');c.application.bot_data['chat_store']=store
-            with patch.object(main,'generate_images',AsyncMock(return_value=[self.image])),patch.object(main,'charge_request') as charge:
+            with patch.object(main,'generate_images',AsyncMock(return_value=[self.image])),patch('image_generation.cache_images',AsyncMock(return_value=['file-id'])),patch.object(main,'charge_request') as charge:
                 await main.generate_answer(u,c,{'subscription':'inactive'},'mountain',force_image=True)
-                charge.assert_called_once();u.message.reply_photo.assert_awaited_once()
+                charge.assert_called_once();self.assertEqual(c.bot._post.call_args.args[0],'sendRichMessage')
+                self.assertEqual(c.bot._post.call_args.kwargs['data']['chat_id'],123)
             store.close()
 
 class TransportAndDeliveryTests(unittest.IsolatedAsyncioTestCase):

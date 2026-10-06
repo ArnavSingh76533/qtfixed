@@ -7,6 +7,7 @@ import random
 import shlex
 import sqlite3
 import uuid
+import time
 from urllib.parse import urlparse
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TelegramError
@@ -33,8 +34,8 @@ def parse_broadcast(text, is_reply=False):
     i = 0
     while i < len(tokens):
         token = tokens[i]
-        if token in ('-user','-group'):
-            options['audience'].append(token[1:])
+        if token in ('-user','-group','--user','--group'):
+            options['audience'].append(token.lstrip('-'))
         elif token in ('-premium','-free'):
             if options['segment'] != 'all':
                 raise ValueError('Choose only one of -premium or -free.')
@@ -200,7 +201,19 @@ class BroadcastManager:
     async def send(self, target, payload):
         kwargs = {'chat_id':target, 'disable_notification':payload['silent'],
                   'reply_markup':markup(payload['buttons'])}
-        if payload['copy']:
+        if payload['copy'] and payload.get('source_messages'):
+            results=await self.bot.copy_messages(chat_id=target,from_chat_id=payload['source_chat'],
+                message_ids=payload['source_messages'],disable_notification=payload['silent'])
+            if len(results)!=len(payload['source_messages']):
+                # A partial album must never be automatically replayed (duplicates).
+                raise NetworkError('Album copy incomplete; outcome requires review')
+            result=results[0]
+            if payload['buttons']:
+                try:
+                    await self.bot.edit_message_reply_markup(chat_id=target,message_id=result.message_id,reply_markup=markup(payload['buttons']))
+                except TelegramError:
+                    logger.warning('Album delivered, but optional buttons could not be attached')
+        elif payload['copy']:
             result = await self.bot.copy_message(from_chat_id=payload['source_chat'],
                 message_id=payload['source_message'], **kwargs)
         else:
@@ -301,6 +314,19 @@ def campaign_keyboard(cid):
          InlineKeyboardButton('Cancel',callback_data=f'bc:cancel:{cid}',style='danger')]])
 
 
+async def collect_album(update,context):
+    message=update.effective_message
+    if not message or not update.effective_user or str(update.effective_user.id)!=ADMIN_ID or not getattr(message,'media_group_id',None):return
+    cache=context.application.bot_data.setdefault('broadcast_albums',{})
+    now=time.monotonic()
+    for key in list(cache):
+        if now-cache[key]['at']>3600:cache.pop(key,None)
+    key=(message.chat_id,message.media_group_id)
+    if key not in cache and len(cache)>=200:cache.pop(next(iter(cache)))
+    album=cache.setdefault(key,{'ids':set(),'at':now})
+    album['ids'].add(message.message_id);album['at']=now
+
+
 async def broadcast(update, context):
     if not await admin_only(update):
         return
@@ -308,7 +334,13 @@ async def broadcast(update, context):
         message = update.effective_message
         payload = parse_broadcast(message.text, bool(message.reply_to_message))
         if payload['copy']:
-            payload.update(source_chat=message.chat_id, source_message=message.reply_to_message.message_id)
+            source=message.reply_to_message
+            payload.update(source_chat=message.chat_id,source_message=source.message_id)
+            if getattr(source,'media_group_id',None):
+                album=context.application.bot_data.get('broadcast_albums',{}).get((message.chat_id,source.media_group_id))
+                if not album or time.monotonic()-album['at']>3600 or len(album['ids'])<2:
+                    raise ValueError('Send or forward the complete album to this bot first, then reply to one item with /broadcast --user.')
+                payload['source_messages']=sorted(album['ids'])
         targets = manager(context).targets(payload)
         if not targets:
             raise ValueError('No eligible recipients match these options.')
