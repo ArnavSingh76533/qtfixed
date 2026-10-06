@@ -43,10 +43,10 @@ class Sandbox:
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./:@-]*',config.SANDBOX_IMAGE):raise ValueError('Invalid sandbox image setting.')
         command=['docker','run','--rm','--pull=never','--name',name,'--network='+network,
             '--read-only','--cap-drop=ALL','--security-opt=no-new-privileges',
-            '--memory='+('512m' if proxy else '256m'),'--memory-swap='+('512m' if proxy else '256m'),'--cpus=1','--pids-limit='+('128' if proxy else '64'),
-            '--ulimit=nofile=128:128','--ulimit=fsize=8388608:8388608',
+            '--memory='+('768m' if proxy else '256m'),'--memory-swap='+('768m' if proxy else '256m'),'--cpus=1','--pids-limit='+('256' if proxy else '64'),
+            '--ulimit=nofile='+('1024:1024' if proxy else '128:128'),'--ulimit=fsize=8388608:8388608',
             '--user=65534:65534','--log-driver=none',
-            '--tmpfs=/tmp:rw,nosuid,nodev,size='+('64m' if proxy else '16m'),
+            '--tmpfs=/tmp:rw,nosuid,nodev,size='+('128m' if proxy else '16m'),
             '--tmpfs=/workspace:rw,nosuid,nodev,size=32m,uid=65534,gid=65534,mode=700',
             '--workdir=/workspace','--env=HOME=/workspace','--env=PYTHONDONTWRITEBYTECODE=1','-i']
         if config.SANDBOX_RUNTIME:

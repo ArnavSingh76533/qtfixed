@@ -163,7 +163,7 @@ Containers/networks are cleaned up after execution, failure and cancellation;
 a hard process/server crash may leave an empty internal network to remove later.
 
 Normal Python/shell calls remain offline unless `network=true` is requested.
-Network workers get 512 MB RAM, 128 PIDs and 64 MB temporary storage to support
+Network workers get 768 MB RAM, 256 PIDs and 128 MB temporary storage to support
 Chromium; offline workers and proxy sidecars retain 256 MB/64 PIDs. Both have one
 CPU, a read-only root, non-root user, no capabilities and no published ports.
 `requests`, BeautifulSoup, Playwright and system Chromium are included after the
@@ -229,7 +229,7 @@ requests and Chromium, denial of metadata/loopback, and denial of direct outboun
 connections in addition to the original offline isolation/file checks. Public
 internet must be reachable from the VPS for this optional web smoke test.
 
-Try: **“Read https://www.cricbuzz.com/cricket-match/live-scores, inspect its live
+Try: **“agent read https://www.cricbuzz.com/cricket-match/live-scores, inspect its live
 HTML, write a complete Python score checker, test it against saved HTML and live
 HTTP in the sandbox, fix errors, and give me the code with the actual test result.
 If access is denied or no scores are found, say so instead of claiming it works.”**
