@@ -18,9 +18,14 @@ def run():
     program.write_text(data['code'])
     # Output goes to bounded tmpfs files, not unbounded host process pipes.
     with open('/tmp/stdout','w+') as out,open('/tmp/stderr','w+') as err:
-        process=subprocess.run(['python','-I',str(program)] if data['mode']=='python' else ['/bin/sh',str(program)],stdout=out,stderr=err,timeout=25)
+        try:
+            process=subprocess.run(['python','-I',str(program)] if data['mode']=='python' else ['/bin/sh',str(program)],stdout=out,stderr=err,timeout=25)
+            exit_code=process.returncode
+        except subprocess.TimeoutExpired:
+            exit_code=124
+            err.write('\nExecution exceeded 25 seconds; the code process was stopped.\n')
         out.seek(0);err.seek(0)
-        result={'exit_code':process.returncode,'stdout':out.read(12000),'stderr':err.read(4000),'files':{}}
+        result={'exit_code':exit_code,'stdout':out.read(12000),'stderr':err.read(4000),'files':{}}
     total=0
     for path in root.rglob('*'):
         if path.is_symlink() or not path.is_file() or path==program:continue

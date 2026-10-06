@@ -108,7 +108,7 @@ class Sandbox:
                     out,err=await asyncio.gather(bounded(process.stdout,12*1024*1024),bounded(process.stderr,32000))
                     await process.wait();return out,err
                 out,err=await asyncio.wait_for(interact(),config.SANDBOX_TIMEOUT+5)
-                if process.returncode:raise ValueError('Sandbox failed to start or exceeded resources. Check /agentstatus and server Docker setup.')
+                if process.returncode:raise ValueError('Sandbox runner failed (exit '+str(process.returncode)+'): '+err.decode(errors='replace')[-1200:])
                 try:result=json.loads(out)
                 except (ValueError,UnicodeDecodeError):raise ValueError('Sandbox returned invalid output.') from None
                 if not isinstance(result,dict) or not isinstance(result.get('files'),dict):raise ValueError('Invalid sandbox result.')

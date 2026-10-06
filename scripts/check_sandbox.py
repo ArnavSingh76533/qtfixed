@@ -54,7 +54,7 @@ print('public HTTPS works; metadata, loopback and direct egress blocked')
 BROWSER_CODE='''import os
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
-    browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,
+    browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,timeout=10000,
         args=['--no-sandbox','--disable-dev-shm-usage','--proxy-bypass-list=<-loopback>'],
         proxy={'server':os.environ['HTTPS_PROXY']})
     page=browser.new_page()
